@@ -1,0 +1,16 @@
+.git
+.idea
+.pytest_cache
+.venv
+__pycache__
+*.py[cod]
+*.sqlite3
+*.sqlite3-*
+data/
+.env
+.env.*
+!.env.example
+Dockerfile
+docker-compose.yml
+compose.yaml
+adlanTgBot.iml

@@ -1,0 +1,40 @@
+services:
+  api:
+    image: adlan-tg-bot:latest
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/bot.sqlite3
+    command: >
+      sh -c "python -m app.db.migrations &&
+      uvicorn app.api.app:create_app --factory --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  bot:
+    image: adlan-tg-bot:latest
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/bot.sqlite3
+    command: python -m app.main
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
