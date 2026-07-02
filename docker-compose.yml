@@ -6,13 +6,16 @@ services:
       - .env
     environment:
       DATABASE_PATH: /app/data/bot.sqlite3
-    command: >
-      sh -c "python -m app.db.migrations &&
-      uvicorn app.api.app:create_app --factory --host 0.0.0.0 --port 8000"
+    command:
+      [
+        "sh",
+        "-c",
+        "python -m app.db.migrations && uvicorn app.api.app:create_app --factory --host 0.0.0.0 --port 8000",
+      ]
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data
+      - bot-data:/app/data
     restart: unless-stopped
     healthcheck:
       test:
@@ -34,7 +37,10 @@ services:
       - .env
     environment:
       DATABASE_PATH: /app/data/bot.sqlite3
-    command: python -m app.main
+    command: ["python", "-m", "app.main"]
     volumes:
-      - ./data:/app/data
+      - bot-data:/app/data
     restart: unless-stopped
+
+volumes:
+  bot-data:
