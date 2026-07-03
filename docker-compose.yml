@@ -15,7 +15,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - bot-data:/app/data
+      - /root/adlanbot/data:/app/data
     restart: unless-stopped
     healthcheck:
       test:
@@ -39,8 +39,5 @@ services:
       DATABASE_PATH: /app/data/bot.sqlite3
     command: ["python", "-m", "app.main"]
     volumes:
-      - bot-data:/app/data
+      - /root/adlanbot/data:/app/data
     restart: unless-stopped
-
-volumes:
-  bot-data:
