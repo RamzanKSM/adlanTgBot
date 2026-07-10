@@ -18,15 +18,11 @@ logger = logging.getLogger(__name__)
 
 USER_COMMANDS = [
     BotCommand(command="start", description="Начать работу с ботом"),
-    BotCommand(command="tariffs", description="Посмотреть тарифы"),
-    BotCommand(command="access", description="Проверить доступ"),
 ]
 
 ADMIN_COMMANDS = [
     *USER_COMMANDS,
-    BotCommand(command="admin_tariffs", description="Список всех тарифов"),
     BotCommand(command="tariff_set", description='Создать тариф: код "Название" цена дни'),
-    BotCommand(command="tariff_disable", description="Отключить тариф"),
     BotCommand(command="grant_access", description="Выдать доступ вручную"),
 ]
 

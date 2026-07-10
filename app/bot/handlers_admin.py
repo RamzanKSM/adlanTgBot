@@ -1,11 +1,22 @@
 import shlex
 from dataclasses import dataclass
 
-from aiogram import Router
+from aiogram import F, Router
+from aiogram.enums import ChatType
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message, User
 
 from app.bot.filters import PRIVATE_CHAT_FILTER
+from app.bot.keyboards import (
+    ADMIN_DISABLE_TARIFF_BUTTON,
+    ADMIN_DISABLE_TARIFF_CANCEL,
+    ADMIN_DISABLE_TARIFF_CONFIRM_PREFIX,
+    ADMIN_DISABLE_TARIFF_SELECT_PREFIX,
+    ADMIN_GRANT_ACCESS_DAYS_BY_BUTTON,
+    ADMIN_TARIFFS_BUTTON,
+    admin_disable_tariff_confirm_keyboard,
+    admin_disable_tariffs_keyboard,
+)
 from app.config import Settings
 from app.db.connection import open_database
 from app.db.repositories import TariffsRepository
@@ -54,6 +65,9 @@ class TariffSetValidationError(ValueError):
     pass
 
 
+ADMIN_GRANT_ACCESS_BUTTONS = tuple(ADMIN_GRANT_ACCESS_DAYS_BY_BUTTON)
+
+
 def parse_tariff_set_args(text: str | None) -> TariffSetArgs:
     try:
         args = shlex.split((text or "").partition(" ")[2])
@@ -93,29 +107,56 @@ def parse_tariff_set_args(text: str | None) -> TariffSetArgs:
     )
 
 
-def _is_admin(message: Message, settings: Settings) -> bool:
-    user = message.from_user
+def _is_admin_user(user: User | None, settings: Settings) -> bool:
     if user is None:
         return False
     return settings.is_admin(user.id, user.username)
 
 
-@router.message(Command("admin_tariffs"))
-async def admin_tariffs(message: Message, settings: Settings) -> None:
-    if not _is_admin(message, settings):
-        return
+def _is_admin(message: Message, settings: Settings) -> bool:
+    return _is_admin_user(message.from_user, settings)
+
+
+def _is_private_callback(callback: CallbackQuery) -> bool:
+    return isinstance(callback.message, Message) and callback.message.chat.type == ChatType.PRIVATE
+
+
+async def _answer_admin_tariffs(message: Message, settings: Settings) -> None:
     async with open_database(settings.database_path) as db:
         tariffs = await TariffsRepository(db).list_all()
     if not tariffs:
         await message.answer("Тарифов нет.")
         return
     await message.answer(
-        "\n".join(
+        "\n\n".join(
             f"{item.code}: {item.title}, {item.price_amount} {item.currency}, "
             f"{item.duration_days} дн., active={item.is_active}, sort={item.sort_order}"
             for item in tariffs
         )
     )
+
+
+async def _answer_disable_tariff_list(message: Message, settings: Settings) -> None:
+    async with open_database(settings.database_path) as db:
+        tariffs = await TariffsRepository(db).list_active()
+    if not tariffs:
+        await message.answer("Активных тарифов нет.")
+        return
+    await message.answer("Выберите тариф для отключения:", reply_markup=admin_disable_tariffs_keyboard(tariffs))
+
+
+@router.message(Command("admin_tariffs"))
+async def admin_tariffs(message: Message, settings: Settings) -> None:
+    if not _is_admin(message, settings):
+        return
+    await _answer_admin_tariffs(message, settings)
+
+
+@router.message(F.text == ADMIN_TARIFFS_BUTTON)
+async def admin_tariffs_button(message: Message, settings: Settings) -> None:
+    if not _is_admin(message, settings):
+        return
+    await _answer_admin_tariffs(message, settings)
 
 
 @router.message(Command("tariff_set"))
@@ -158,6 +199,46 @@ async def tariff_disable(message: Message, settings: Settings) -> None:
         changed = await TariffsRepository(db).set_active(code, False)
         await db.commit()
     await message.answer("Тариф отключен." if changed else "Тариф не найден.")
+
+
+@router.message(F.text == ADMIN_DISABLE_TARIFF_BUTTON)
+async def tariff_disable_button(message: Message, settings: Settings) -> None:
+    if not _is_admin(message, settings):
+        return
+    await _answer_disable_tariff_list(message, settings)
+
+
+@router.callback_query(F.data.startswith(ADMIN_DISABLE_TARIFF_SELECT_PREFIX))
+async def tariff_disable_select(callback: CallbackQuery, settings: Settings) -> None:
+    if not _is_admin_user(callback.from_user, settings) or callback.data is None or not _is_private_callback(callback):
+        return
+    code = callback.data.removeprefix(ADMIN_DISABLE_TARIFF_SELECT_PREFIX)
+    await callback.message.edit_text(
+        f"Отключить тариф {code}?",
+        reply_markup=admin_disable_tariff_confirm_keyboard(code),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith(ADMIN_DISABLE_TARIFF_CONFIRM_PREFIX))
+async def tariff_disable_confirm(callback: CallbackQuery, settings: Settings) -> None:
+    if not _is_admin_user(callback.from_user, settings) or callback.data is None or not _is_private_callback(callback):
+        return
+    code = callback.data.removeprefix(ADMIN_DISABLE_TARIFF_CONFIRM_PREFIX)
+    async with open_database(settings.database_path) as db:
+        changed = await TariffsRepository(db).set_active(code, False)
+        await db.commit()
+    text = "Тариф отключен." if changed else "Тариф не найден."
+    await callback.message.edit_text(text)
+    await callback.answer()
+
+
+@router.callback_query(F.data == ADMIN_DISABLE_TARIFF_CANCEL)
+async def tariff_disable_cancel(callback: CallbackQuery, settings: Settings) -> None:
+    if not _is_admin_user(callback.from_user, settings) or not _is_private_callback(callback):
+        return
+    await callback.message.edit_text("Отключение тарифа отменено.")
+    await callback.answer()
 
 
 @router.message(Command("grant_access"))
@@ -203,5 +284,28 @@ async def grant_access(message: Message, settings: Settings) -> None:
 
     await message.answer(
         f"Доступ выдан пользователю {grant.user.telegram_user_id} до "
+        f"{format_datetime_moscow(grant.user.access_until)}."
+    )
+
+
+@router.message(F.text.in_(ADMIN_GRANT_ACCESS_BUTTONS))
+async def grant_access_self_button(message: Message, settings: Settings) -> None:
+    if not _is_admin(message, settings) or message.from_user is None:
+        return
+    duration_days = ADMIN_GRANT_ACCESS_DAYS_BY_BUTTON[message.text or ""]
+    async with open_database(settings.database_path) as db:
+        grant = await grant_manual_access(
+            db,
+            telegram_user_id=message.from_user.id,
+            duration_days=duration_days,
+            granted_by_telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+        )
+        await db.commit()
+
+    await message.answer(
+        f"Доступ выдан вам на {duration_days} дн. до "
         f"{format_datetime_moscow(grant.user.access_until)}."
     )
