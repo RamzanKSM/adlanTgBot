@@ -1,27 +1,30 @@
 import hashlib
 import hmac
+import json
 from dataclasses import dataclass
 from datetime import datetime
-from datetime import timedelta
+from datetime import UTC
+from decimal import Decimal
+from decimal import InvalidOperation
 from typing import Any
 
 import httpx
 
 from app.config import Settings
-from app.utils.datetime import datetime_to_iso, iso_to_datetime, utc_now
+from app.utils.datetime import iso_to_datetime
 
 
 @dataclass(frozen=True, slots=True)
 class LavaInvoice:
-    provider_invoice_id: str | None
+    invoice_id: str | None
     payment_url: str
     raw_payload: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
 class LavaPaymentNotification:
-    internal_invoice_id: str | None
-    provider_invoice_id: str | None
+    order_id: str | None
+    invoice_id: str | None
     status: str
     amount: int | None
     currency: str | None
@@ -47,49 +50,62 @@ class LavaClient:
 
     async def create_invoice(
         self,
-        internal_invoice_id: str,
+        order_id: str,
         amount: int,
         currency: str,
         description: str,
         success_url: str,
         webhook_url: str,
         expires_minutes: int = 60,
+        fail_url: str | None = None,
     ) -> LavaInvoice:
-        if not self.settings.lava_base_url or not self.settings.lava_api_key:
+        if not self.settings.lava_shop_id or not self._secret_key:
             return LavaInvoice(
-                provider_invoice_id=None,
-                payment_url=f"{self.settings.app_base_url.rstrip('/')}/lava/success?invoice={internal_invoice_id}",
+                invoice_id=None,
+                payment_url=f"{self.settings.app_base_url.rstrip('/')}/lava/success?invoice={order_id}",
                 raw_payload={"stub": True, "reason": "Lava credentials are not configured"},
             )
 
         payload = {
-            "shop_id": self.settings.lava_shop_id,
-            "order_id": internal_invoice_id,
-            "amount": amount,
-            "currency": currency,
-            "description": description,
-            "success_url": success_url,
-            "webhook_url": webhook_url,
-            "expires_at": datetime_to_iso(utc_now() + timedelta(minutes=expires_minutes)),
+            "sum": amount,
+            "orderId": order_id,
+            "shopId": self.settings.lava_shop_id,
+            "hookUrl": webhook_url,
+            "successUrl": success_url,
         }
+        if fail_url:
+            payload["failUrl"] = fail_url
+        payload["expire"] = expires_minutes
+        body = self._json_body(payload)
         response = await self.http_client.post(
-            f"{self.settings.lava_base_url.rstrip('/')}/invoice/create",
-            json=payload,
-            headers={"Authorization": f"Bearer {self.settings.lava_api_key}"},
+            f"{self._base_url}/business/invoice/create",
+            content=body,
+            headers=self._signed_headers(body),
         )
         response.raise_for_status()
         data = response.json()
-        invoice_id = data.get("id") or data.get("invoice_id") or data.get("data", {}).get("id")
-        payment_url = data.get("payment_url") or data.get("url") or data.get("data", {}).get("payment_url")
+        response_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+        invoice_id = (
+            data.get("invoice_id")
+            or data.get("invoiceId")
+            or response_data.get("invoice_id")
+            or response_data.get("invoiceId")
+        )
+        payment_url = (
+            data.get("payment_url")
+            or data.get("paymentUrl")
+            or response_data.get("payment_url")
+            or response_data.get("paymentUrl")
+        )
         if not payment_url:
             raise ValueError("Lava invoice response does not contain payment_url")
         return LavaInvoice(str(invoice_id) if invoice_id else None, str(payment_url), data)
 
-    async def get_invoice_status(self, provider_invoice_id: str | None, internal_invoice_id: str) -> LavaPaymentNotification:
-        if not self.settings.lava_base_url or not self.settings.lava_api_key:
+    async def get_invoice_status(self, invoice_id: str | None, order_id: str) -> LavaPaymentNotification:
+        if not self.settings.lava_shop_id or not self._secret_key:
             return LavaPaymentNotification(
-                internal_invoice_id=internal_invoice_id,
-                provider_invoice_id=provider_invoice_id,
+                order_id=order_id,
+                invoice_id=invoice_id,
                 status="pending",
                 amount=None,
                 currency=None,
@@ -97,31 +113,35 @@ class LavaClient:
                 raw_payload={"stub": True, "reason": "Lava credentials are not configured"},
             )
 
-        response = await self.http_client.get(
-            f"{self.settings.lava_base_url.rstrip('/')}/invoice/status",
-            params={"invoice_id": provider_invoice_id, "order_id": internal_invoice_id},
-            headers={"Authorization": f"Bearer {self.settings.lava_api_key}"},
+        payload = {"shopId": self.settings.lava_shop_id}
+        if invoice_id:
+            payload["invoiceId"] = invoice_id
+        else:
+            payload["orderId"] = order_id
+        body = self._json_body(payload)
+        response = await self.http_client.post(
+            f"{self._base_url}/business/invoice/status",
+            content=body,
+            headers=self._signed_headers(body),
         )
         response.raise_for_status()
         data = response.json()
         return self.normalize_payload(data)
 
     def verify_webhook(self, body: bytes, signature: str | None) -> bool:
-        if not self.settings.lava_webhook_secret:
-            return True
-        if not signature:
+        if not self._additional_key or not signature:
             return False
         expected = hmac.new(
-            self.settings.lava_webhook_secret.encode(),
+            self._additional_key.encode(),
             body,
             hashlib.sha256,
         ).hexdigest()
-        supplied = signature.removeprefix("sha256=").strip()
+        supplied = signature.strip()
         return hmac.compare_digest(expected, supplied)
 
     def normalize_payload(self, payload: dict[str, Any]) -> LavaPaymentNotification:
         data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-        raw_status = str(data.get("status") or data.get("invoice_status") or "").lower()
+        raw_status = str(data.get("status") or "").lower()
         status = {
             "success": "paid",
             "completed": "paid",
@@ -132,16 +152,45 @@ class LavaClient:
             "canceled": "cancelled",
         }.get(raw_status, raw_status or "unknown")
         amount = data.get("amount") or data.get("sum")
-        paid_at = data.get("paid_at") or data.get("paidAt") or data.get("updated_at")
+        paid_at = (
+            data.get("pay_time")
+            or data.get("payTime")
+            or data.get("paid_at")
+            or data.get("paidAt")
+            or data.get("updated_at")
+        )
         return LavaPaymentNotification(
-            internal_invoice_id=_optional_str(data.get("order_id") or data.get("internal_invoice_id")),
-            provider_invoice_id=_optional_str(data.get("invoice_id") or data.get("id")),
+            order_id=_optional_str(data.get("order_id") or data.get("orderId")),
+            invoice_id=_optional_str(data.get("invoice_id") or data.get("invoiceId")),
             status=status,
-            amount=int(amount) if amount is not None and str(amount).isdigit() else None,
+            amount=_optional_int(amount),
             currency=_optional_str(data.get("currency")),
-            paid_at=iso_to_datetime(str(paid_at)) if paid_at else None,
+            paid_at=_optional_datetime(paid_at),
             raw_payload=payload,
         )
+
+    @property
+    def _base_url(self) -> str:
+        return (self.settings.lava_base_url or "https://api.lava.ru").rstrip("/")
+
+    @property
+    def _secret_key(self) -> str:
+        return self.settings.lava_secret_key
+
+    @property
+    def _additional_key(self) -> str:
+        return self.settings.lava_additional_key
+
+    def _signed_headers(self, body: str) -> dict[str, str]:
+        return {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Signature": hmac.new(self._secret_key.encode(), body.encode(), hashlib.sha256).hexdigest(),
+        }
+
+    @staticmethod
+    def _json_body(payload: dict[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def _optional_str(value: object) -> str | None:
@@ -149,3 +198,23 @@ def _optional_str(value: object) -> str | None:
         return None
     result = str(value).strip()
     return result or None
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(Decimal(str(value)))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _optional_datetime(value: object) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=UTC)
+    try:
+        return iso_to_datetime(str(value))
+    except ValueError:
+        return None

@@ -19,10 +19,10 @@ class Settings(BaseSettings):
     admin_ids_raw: str = Field(default="", validation_alias="ADMIN_IDS")
     admin_usernames_raw: str = Field(default="", validation_alias="ADMIN_USERNAMES")
 
-    lava_base_url: str = ""
+    lava_base_url: str = "https://api.lava.ru"
     lava_shop_id: str = ""
-    lava_api_key: str = ""
-    lava_webhook_secret: str = ""
+    lava_secret_key: str = ""
+    lava_additional_key: str = ""
     payment_provider: str = "lava"
     mock_payments_enabled: bool = Field(default=False, validation_alias="MOCK_PAYMENTS_ENABLED")
 

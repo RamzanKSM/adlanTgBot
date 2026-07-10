@@ -51,18 +51,18 @@ class PaymentService:
         if tariff is None:
             raise ValueError("tariff is not active")
 
-        internal_invoice_id = uuid4().hex
+        order_id = uuid4().hex
         expires_at = utc_now() + timedelta(hours=1)
         if self.settings.is_mock_payments_enabled:
-            payment_url = f"{self.settings.app_base_url.rstrip('/')}/mock/payments/{internal_invoice_id}/pay"
+            payment_url = f"{self.settings.app_base_url.rstrip('/')}/mock/payments/{order_id}/pay"
             payment = await self.payments.create(
                 user_id=user.id,
                 tariff_id=tariff.id,
-                internal_invoice_id=internal_invoice_id,
+                order_id=order_id,
                 amount=tariff.price_amount,
                 currency=tariff.currency,
                 payment_url=payment_url,
-                provider_invoice_id=f"mock-{internal_invoice_id}",
+                invoice_id=f"mock-{order_id}",
                 expires_at=expires_at,
                 provider="mock",
                 raw_payload={"mock": True, "payment_url": payment_url},
@@ -76,10 +76,10 @@ class PaymentService:
             await self.db.commit()
             return CreatedPayment(payment=payment, payment_url=payment_url)
 
-        success_url = f"{self.settings.app_base_url.rstrip('/')}/lava/success?invoice={internal_invoice_id}"
+        success_url = f"{self.settings.app_base_url.rstrip('/')}/lava/success?invoice={order_id}"
         webhook_url = f"{self.settings.app_base_url.rstrip('/')}/lava/webhook"
         invoice = await self.lava_client.create_invoice(
-            internal_invoice_id=internal_invoice_id,
+            order_id=order_id,
             amount=tariff.price_amount,
             currency=tariff.currency,
             description=f"{tariff.title} ({tariff.duration_days} days)",
@@ -89,11 +89,11 @@ class PaymentService:
         payment = await self.payments.create(
             user_id=user.id,
             tariff_id=tariff.id,
-            internal_invoice_id=internal_invoice_id,
+            order_id=order_id,
             amount=tariff.price_amount,
             currency=tariff.currency,
             payment_url=invoice.payment_url,
-            provider_invoice_id=invoice.provider_invoice_id,
+            invoice_id=invoice.invoice_id,
             expires_at=expires_at,
             provider="lava",
             raw_payload=invoice.raw_payload,
@@ -112,17 +112,19 @@ class PaymentService:
         notification: LavaPaymentNotification,
         expected_provider: str | None = None,
     ) -> PaidPaymentResult:
-        if not notification.internal_invoice_id and not notification.provider_invoice_id:
+        order_id = _notification_order_id(notification)
+        invoice_id = _notification_invoice_id(notification)
+        if not order_id and not invoice_id:
             raise ValueError("payment notification has no invoice id")
 
         paid_at = notification.paid_at or utc_now()
         await self.db.execute("BEGIN IMMEDIATE")
         try:
             payment = None
-            if notification.internal_invoice_id:
-                payment = await self.payments.get_by_internal_invoice_id(notification.internal_invoice_id)
-            if payment is None and notification.provider_invoice_id:
-                payment = await self.payments.get_by_provider_invoice_id(notification.provider_invoice_id)
+            if order_id:
+                payment = await self.payments.get_by_order_id(order_id)
+            if payment is None and invoice_id:
+                payment = await self.payments.get_by_invoice_id(invoice_id)
             if payment is None:
                 raise ValueError("payment is not found")
             if expected_provider is not None and payment.provider != expected_provider:
@@ -145,7 +147,7 @@ class PaymentService:
 
             await self.payments.mark_paid(
                 payment_id=payment.id,
-                provider_invoice_id=notification.provider_invoice_id,
+                invoice_id=invoice_id,
                 paid_at=paid_at,
                 raw_payload=notification.raw_payload,
             )
@@ -180,11 +182,13 @@ class PaymentService:
     async def apply_status_notification(self, notification: LavaPaymentNotification) -> PaidPaymentResult | None:
         if notification.status == "paid":
             return await self.handle_paid(notification)
+        order_id = _notification_order_id(notification)
+        invoice_id = _notification_invoice_id(notification)
         payment = None
-        if notification.internal_invoice_id:
-            payment = await self.payments.get_by_internal_invoice_id(notification.internal_invoice_id)
-        if payment is None and notification.provider_invoice_id:
-            payment = await self.payments.get_by_provider_invoice_id(notification.provider_invoice_id)
+        if order_id:
+            payment = await self.payments.get_by_order_id(order_id)
+        if payment is None and invoice_id:
+            payment = await self.payments.get_by_invoice_id(invoice_id)
         if payment is not None and notification.status in {"failed", "expired", "cancelled"}:
             await self.payments.mark_status(payment.id, notification.status, notification.raw_payload)
             await self.db.commit()
@@ -192,31 +196,39 @@ class PaymentService:
 
     async def check_pending_payment(self, payment: PaymentRecord) -> PaidPaymentResult | None:
         notification = await self.lava_client.get_invoice_status(
-            provider_invoice_id=payment.provider_invoice_id,
-            internal_invoice_id=payment.internal_invoice_id,
+            invoice_id=payment.invoice_id,
+            order_id=payment.order_id,
         )
         return await self.apply_status_notification(notification)
 
-    async def confirm_mock_payment(self, internal_invoice_id: str) -> PaidPaymentResult:
+    async def confirm_mock_payment(self, order_id: str) -> PaidPaymentResult:
         notification = notification_from_paid_payment(
-            internal_invoice_id=internal_invoice_id,
-            provider_invoice_id=f"mock-{internal_invoice_id}",
+            order_id=order_id,
+            invoice_id=f"mock-{order_id}",
             raw_payload={"mock": True, "status": "paid"},
         )
         return await self.handle_paid(notification, expected_provider="mock")
 
 
 def notification_from_paid_payment(
-    internal_invoice_id: str,
-    provider_invoice_id: str | None = None,
+    order_id: str,
+    invoice_id: str | None = None,
     raw_payload: dict[str, Any] | None = None,
 ) -> LavaPaymentNotification:
     return LavaPaymentNotification(
-        internal_invoice_id=internal_invoice_id,
-        provider_invoice_id=provider_invoice_id,
+        order_id=order_id,
+        invoice_id=invoice_id,
         status="paid",
         amount=None,
         currency=None,
         paid_at=utc_now(),
         raw_payload=raw_payload or {"test": True},
     )
+
+
+def _notification_order_id(notification: LavaPaymentNotification) -> str | None:
+    return notification.order_id
+
+
+def _notification_invoice_id(notification: LavaPaymentNotification) -> str | None:
+    return notification.invoice_id

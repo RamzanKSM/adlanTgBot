@@ -16,7 +16,7 @@ async def lava_webhook(request: Request) -> dict[str, str]:
     bot = request.app.state.bot
 
     body = await request.body()
-    signature = request.headers.get("X-Lava-Signature") or request.headers.get("X-Signature")
+    signature = request.headers.get("Authorization")
     if not lava_client.verify_webhook(body, signature):
         raise HTTPException(status_code=401, detail="invalid signature")
 

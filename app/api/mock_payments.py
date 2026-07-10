@@ -17,18 +17,18 @@ INVITE_ERROR_TEXT = (
 
 
 @router.api_route(
-    "/mock/payments/{internal_invoice_id}/pay",
+    "/mock/payments/{order_id}/pay",
     methods=["GET", "POST"],
     response_class=PlainTextResponse,
     response_model=None,
 )
 @router.api_route(
-    "/mock/pay/{internal_invoice_id}",
+    "/mock/pay/{order_id}",
     methods=["GET", "POST"],
     response_class=PlainTextResponse,
     response_model=None,
 )
-async def mock_pay(internal_invoice_id: str, request: Request) -> PlainTextResponse:
+async def mock_pay(order_id: str, request: Request) -> PlainTextResponse:
     settings = request.app.state.settings
     if not settings.is_mock_payments_enabled:
         raise HTTPException(status_code=404, detail="mock payments are disabled")
@@ -36,7 +36,7 @@ async def mock_pay(internal_invoice_id: str, request: Request) -> PlainTextRespo
     async with open_database(settings.database_path) as db:
         payment_service = PaymentService(db, settings, request.app.state.lava_client)
         try:
-            result = await payment_service.confirm_mock_payment(internal_invoice_id)
+            result = await payment_service.confirm_mock_payment(order_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

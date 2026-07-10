@@ -37,8 +37,8 @@ CREATE TABLE IF NOT EXISTS payments (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     tariff_id INTEGER NOT NULL REFERENCES tariffs(id) ON DELETE RESTRICT,
     provider TEXT NOT NULL DEFAULT 'lava',
-    provider_invoice_id TEXT,
-    internal_invoice_id TEXT NOT NULL UNIQUE,
+    invoice_id TEXT,
+    order_id TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL,
     amount INTEGER NOT NULL,
     currency TEXT NOT NULL,
@@ -51,7 +51,6 @@ CREATE TABLE IF NOT EXISTS payments (
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_payments_provider_invoice_id ON payments(provider_invoice_id);
 CREATE INDEX IF NOT EXISTS idx_payments_status_created_at ON payments(status, created_at);
 
 CREATE TABLE IF NOT EXISTS invite_links (
@@ -82,9 +81,27 @@ CREATE INDEX IF NOT EXISTS idx_access_events_user_created_at ON access_events(te
 """
 
 
+async def _payments_columns(db) -> set[str]:
+    rows = await db.execute_fetchall("PRAGMA table_info(payments)")
+    return {row["name"] for row in rows}
+
+
+async def _migrate_payment_column_names(db) -> None:
+    columns = await _payments_columns(db)
+    if "internal_invoice_id" in columns and "order_id" not in columns:
+        await db.execute("ALTER TABLE payments RENAME COLUMN internal_invoice_id TO order_id")
+        columns = await _payments_columns(db)
+    if "provider_invoice_id" in columns and "invoice_id" not in columns:
+        await db.execute("ALTER TABLE payments RENAME COLUMN provider_invoice_id TO invoice_id")
+
+    await db.execute("DROP INDEX IF EXISTS idx_payments_provider_invoice_id")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_invoice_id ON payments(invoice_id)")
+
+
 async def run_migrations(database_path: str) -> None:
     async with open_database(database_path) as db:
         await db.executescript(SCHEMA_SQL)
+        await _migrate_payment_column_names(db)
         await db.commit()
 
 

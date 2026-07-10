@@ -39,8 +39,8 @@ class PaymentRecord:
     user_id: int
     tariff_id: int
     provider: str
-    provider_invoice_id: str | None
-    internal_invoice_id: str
+    invoice_id: str | None
+    order_id: str
     status: str
     amount: int
     currency: str
@@ -114,8 +114,8 @@ def _payment(row: aiosqlite.Row | None) -> PaymentRecord | None:
         user_id=row["user_id"],
         tariff_id=row["tariff_id"],
         provider=row["provider"],
-        provider_invoice_id=row["provider_invoice_id"],
-        internal_invoice_id=row["internal_invoice_id"],
+        invoice_id=row["invoice_id"],
+        order_id=row["order_id"],
         status=row["status"],
         amount=row["amount"],
         currency=row["currency"],
@@ -319,11 +319,11 @@ class PaymentsRepository:
         self,
         user_id: int,
         tariff_id: int,
-        internal_invoice_id: str,
+        order_id: str,
         amount: int,
         currency: str,
         payment_url: str | None,
-        provider_invoice_id: str | None,
+        invoice_id: str | None,
         expires_at: datetime | None,
         provider: str = "lava",
         raw_payload: dict[str, Any] | None = None,
@@ -332,7 +332,7 @@ class PaymentsRepository:
         await self.db.execute(
             """
             INSERT INTO payments (
-                user_id, tariff_id, provider, provider_invoice_id, internal_invoice_id, status,
+                user_id, tariff_id, provider, invoice_id, order_id, status,
                 amount, currency, payment_url, created_at, expires_at, raw_payload
             )
             VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
@@ -341,8 +341,8 @@ class PaymentsRepository:
                 user_id,
                 tariff_id,
                 provider,
-                provider_invoice_id,
-                internal_invoice_id,
+                invoice_id,
+                order_id,
                 amount,
                 currency,
                 payment_url,
@@ -353,36 +353,36 @@ class PaymentsRepository:
         )
         row = await _fetchone(
             self.db,
-            "SELECT * FROM payments WHERE internal_invoice_id = ?",
-            (internal_invoice_id,),
+            "SELECT * FROM payments WHERE order_id = ?",
+            (order_id,),
         )
         payment = _payment(row)
         if payment is None:
             raise RuntimeError("failed to create payment")
         return payment
 
-    async def get_by_internal_invoice_id(self, internal_invoice_id: str) -> PaymentRecord | None:
+    async def get_by_order_id(self, order_id: str) -> PaymentRecord | None:
         return _payment(
             await _fetchone(
                 self.db,
-                "SELECT * FROM payments WHERE internal_invoice_id = ?",
-                (internal_invoice_id,),
+                "SELECT * FROM payments WHERE order_id = ?",
+                (order_id,),
             )
         )
 
-    async def get_by_provider_invoice_id(self, provider_invoice_id: str) -> PaymentRecord | None:
+    async def get_by_invoice_id(self, invoice_id: str) -> PaymentRecord | None:
         return _payment(
             await _fetchone(
                 self.db,
-                "SELECT * FROM payments WHERE provider_invoice_id = ?",
-                (provider_invoice_id,),
+                "SELECT * FROM payments WHERE invoice_id = ?",
+                (invoice_id,),
             )
         )
 
     async def mark_paid(
         self,
         payment_id: int,
-        provider_invoice_id: str | None,
+        invoice_id: str | None,
         paid_at: datetime,
         raw_payload: dict[str, Any],
     ) -> None:
@@ -390,12 +390,12 @@ class PaymentsRepository:
             """
             UPDATE payments
             SET status = 'paid',
-                provider_invoice_id = COALESCE(?, provider_invoice_id),
+                invoice_id = COALESCE(?, invoice_id),
                 paid_at = COALESCE(paid_at, ?),
                 raw_payload = ?
             WHERE id = ?
             """,
-            (provider_invoice_id, datetime_to_iso(paid_at), dumps_compact(raw_payload), payment_id),
+            (invoice_id, datetime_to_iso(paid_at), dumps_compact(raw_payload), payment_id),
         )
 
     async def mark_applied(self, payment_id: int, applied_at: datetime) -> None:

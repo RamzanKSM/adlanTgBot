@@ -5,7 +5,7 @@ import pytest
 
 from app.config import Settings
 from app.db.connection import connect_database
-from app.db.migrations import SCHEMA_SQL
+from app.db.migrations import run_migrations
 from app.db.repositories import PaymentsRepository, TariffsRepository, UsersRepository
 from app.services.access import grant_manual_access
 from app.services.lava import LavaInvoice, LavaPaymentNotification
@@ -14,9 +14,9 @@ from app.services.payments import PaymentService
 
 @pytest.fixture
 async def db(tmp_path):
-    connection = await connect_database(tmp_path / "test.sqlite3")
-    await connection.executescript(SCHEMA_SQL)
-    await connection.commit()
+    database_path = tmp_path / "test.sqlite3"
+    await run_migrations(str(database_path))
+    connection = await connect_database(database_path)
     try:
         yield connection
     finally:
@@ -36,18 +36,75 @@ async def test_repositories_create_user_tariff_and_payment(db) -> None:
     payment = await PaymentsRepository(db).create(
         user_id=user.id,
         tariff_id=tariff.id,
-        internal_invoice_id="invoice-1",
+        order_id="order-1",
         amount=1000,
         currency="RUB",
         payment_url="https://pay.example/1",
-        provider_invoice_id="lava-1",
+        invoice_id="lava-1",
         expires_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     await db.commit()
 
-    assert payment.internal_invoice_id == "invoice-1"
+    assert payment.order_id == "order-1"
+    assert payment.invoice_id == "lava-1"
+    assert (await PaymentsRepository(db).get_by_order_id("order-1")).id == payment.id
+    assert (await PaymentsRepository(db).get_by_invoice_id("lava-1")).id == payment.id
     assert (await UsersRepository(db).get_by_telegram_id(123)).id == user.id
     assert (await TariffsRepository(db).get_by_code("m1")).id == tariff.id
+
+
+async def test_migrations_rename_legacy_payment_columns(tmp_path) -> None:
+    database_path = tmp_path / "legacy.sqlite3"
+    connection = await connect_database(database_path)
+    await connection.executescript(
+        """
+        CREATE TABLE payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            tariff_id INTEGER NOT NULL,
+            provider TEXT NOT NULL DEFAULT 'lava',
+            provider_invoice_id TEXT,
+            internal_invoice_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            currency TEXT NOT NULL,
+            payment_url TEXT,
+            created_at TEXT NOT NULL,
+            paid_at TEXT,
+            expires_at TEXT,
+            raw_payload TEXT NOT NULL DEFAULT '{}',
+            applied_at TEXT
+        );
+        CREATE INDEX idx_payments_provider_invoice_id ON payments(provider_invoice_id);
+        INSERT INTO payments (
+            user_id, tariff_id, provider, provider_invoice_id, internal_invoice_id, status,
+            amount, currency, created_at
+        )
+        VALUES (1, 1, 'lava', 'lava-1', 'order-1', 'pending', 1000, 'RUB', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    await connection.commit()
+    await connection.close()
+
+    await run_migrations(str(database_path))
+
+    connection = await connect_database(database_path)
+    try:
+        columns = {row["name"] for row in await connection.execute_fetchall("PRAGMA table_info(payments)")}
+        indexes = {row["name"] for row in await connection.execute_fetchall("PRAGMA index_list(payments)")}
+        cursor = await connection.execute("SELECT order_id, invoice_id FROM payments WHERE id = 1")
+        row = await cursor.fetchone()
+    finally:
+        await connection.close()
+
+    assert "order_id" in columns
+    assert "invoice_id" in columns
+    assert "internal_invoice_id" not in columns
+    assert "provider_invoice_id" not in columns
+    assert "idx_payments_invoice_id" in indexes
+    assert "idx_payments_provider_invoice_id" not in indexes
+    assert row["order_id"] == "order-1"
+    assert row["invoice_id"] == "lava-1"
 
 
 async def test_payment_handle_paid_is_idempotent(db, tmp_path) -> None:
@@ -66,11 +123,11 @@ async def test_payment_handle_paid_is_idempotent(db, tmp_path) -> None:
     await payments.create(
         user_id=user.id,
         tariff_id=tariff.id,
-        internal_invoice_id="invoice-1",
+        order_id="order-1",
         amount=1000,
         currency="RUB",
         payment_url="https://pay.example/1",
-        provider_invoice_id=None,
+        invoice_id=None,
         expires_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     await db.commit()
@@ -79,8 +136,8 @@ async def test_payment_handle_paid_is_idempotent(db, tmp_path) -> None:
     service = PaymentService(db, settings, lava_client=None)
     paid_at = datetime(2026, 1, 10, tzinfo=UTC)
     notification = LavaPaymentNotification(
-        internal_invoice_id="invoice-1",
-        provider_invoice_id="lava-1",
+        order_id="order-1",
+        invoice_id="lava-1",
         status="paid",
         amount=1000,
         currency="RUB",
@@ -91,7 +148,7 @@ async def test_payment_handle_paid_is_idempotent(db, tmp_path) -> None:
     first = await service.handle_paid(notification)
     second = await service.handle_paid(notification)
     updated_user = await users.get_by_telegram_id(123)
-    updated_payment = await payments.get_by_internal_invoice_id("invoice-1")
+    updated_payment = await payments.get_by_order_id("order-1")
 
     assert first.already_applied is False
     assert second.already_applied is True
@@ -107,7 +164,7 @@ class RecordingLavaClient:
     async def create_invoice(self, **kwargs) -> LavaInvoice:
         self.create_invoice_calls += 1
         return LavaInvoice(
-            provider_invoice_id="lava-1",
+            invoice_id="lava-1",
             payment_url="https://pay.example/1",
             raw_payload={"provider": "lava", "kwargs": kwargs},
         )
@@ -139,8 +196,8 @@ async def test_mock_payment_provider_creates_local_invoice_without_lava_call(db,
 
     assert lava_client.create_invoice_calls == 0
     assert created.payment.provider == "mock"
-    assert created.payment.payment_url == f"http://localhost:8000/mock/payments/{created.payment.internal_invoice_id}/pay"
-    assert created.payment.provider_invoice_id == f"mock-{created.payment.internal_invoice_id}"
+    assert created.payment.payment_url == f"http://localhost:8000/mock/payments/{created.payment.order_id}/pay"
+    assert created.payment.invoice_id == f"mock-{created.payment.order_id}"
 
 
 async def test_lava_payment_provider_keeps_lava_invoice_creation(db, tmp_path) -> None:
@@ -193,10 +250,10 @@ async def test_confirm_mock_payment_is_idempotent(db, tmp_path) -> None:
     service = PaymentService(db, settings, RecordingLavaClient())
     created = await service.create_payment_for_tariff(user.telegram_user_id, "m1")
 
-    first = await service.confirm_mock_payment(created.payment.internal_invoice_id)
-    second = await service.confirm_mock_payment(created.payment.internal_invoice_id)
+    first = await service.confirm_mock_payment(created.payment.order_id)
+    second = await service.confirm_mock_payment(created.payment.order_id)
     updated_user = await UsersRepository(db).get_by_telegram_id(user.telegram_user_id)
-    updated_payment = await PaymentsRepository(db).get_by_internal_invoice_id(created.payment.internal_invoice_id)
+    updated_payment = await PaymentsRepository(db).get_by_order_id(created.payment.order_id)
 
     assert first.already_applied is False
     assert second.already_applied is True
