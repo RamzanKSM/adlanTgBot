@@ -88,17 +88,21 @@ class LavaClient:
         invoice_id = (
             data.get("invoice_id")
             or data.get("invoiceId")
+            or data.get("id")
             or response_data.get("invoice_id")
             or response_data.get("invoiceId")
+            or response_data.get("id")
         )
         payment_url = (
             data.get("payment_url")
             or data.get("paymentUrl")
+            or data.get("url")
             or response_data.get("payment_url")
             or response_data.get("paymentUrl")
+            or response_data.get("url")
         )
         if not payment_url:
-            raise ValueError("Lava invoice response does not contain payment_url")
+            raise ValueError(f"Lava invoice response does not contain payment URL: {data}")
         return LavaInvoice(str(invoice_id) if invoice_id else None, str(payment_url), data)
 
     async def get_invoice_status(self, invoice_id: str | None, order_id: str) -> LavaPaymentNotification:
@@ -124,6 +128,16 @@ class LavaClient:
             content=body,
             headers=self._signed_headers(body),
         )
+        if response.status_code == 404:
+            return LavaPaymentNotification(
+                order_id=order_id,
+                invoice_id=invoice_id,
+                status="unknown",
+                amount=None,
+                currency=None,
+                paid_at=None,
+                raw_payload=_response_payload(response),
+            )
         response.raise_for_status()
         data = response.json()
         return self.normalize_payload(data)
@@ -161,7 +175,7 @@ class LavaClient:
         )
         return LavaPaymentNotification(
             order_id=_optional_str(data.get("order_id") or data.get("orderId")),
-            invoice_id=_optional_str(data.get("invoice_id") or data.get("invoiceId")),
+            invoice_id=_optional_str(data.get("invoice_id") or data.get("invoiceId") or data.get("id")),
             status=status,
             amount=_optional_int(amount),
             currency=_optional_str(data.get("currency")),
@@ -218,3 +232,13 @@ def _optional_datetime(value: object) -> datetime | None:
         return iso_to_datetime(str(value))
     except ValueError:
         return None
+
+
+def _response_payload(response: httpx.Response) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"status_code": response.status_code, "text": response.text}
+    if isinstance(payload, dict):
+        return payload
+    return {"status_code": response.status_code, "data": payload}

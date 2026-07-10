@@ -40,7 +40,7 @@ async def test_create_invoice_posts_business_payload_with_signature() -> None:
         seen["headers"] = request.headers
         return httpx.Response(
             200,
-            json={"data": {"invoiceId": "lava-invoice-1", "paymentUrl": "https://pay.example/i/1"}},
+            json={"data": {"id": "lava-invoice-1", "url": "https://pay.example/i/1"}},
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
@@ -120,6 +120,26 @@ async def test_get_invoice_status_posts_business_payload_with_invoice_id() -> No
     assert notification.status == "paid"
     assert notification.amount == 1500
     assert notification.paid_at == datetime(2026, 7, 10, 10, 11, 12, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_get_invoice_status_treats_not_found_as_unknown_without_raising() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            404,
+            json={"data": None, "error": "Invoice not found", "status": 404, "status_check": False},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        notification = await LavaClient(_settings(), http_client).get_invoice_status(
+            invoice_id="lava-invoice-1",
+            order_id="order-1",
+        )
+
+    assert notification.order_id == "order-1"
+    assert notification.invoice_id == "lava-invoice-1"
+    assert notification.status == "unknown"
+    assert notification.raw_payload["error"] == "Invoice not found"
 
 
 def test_verify_webhook_uses_additional_key() -> None:
