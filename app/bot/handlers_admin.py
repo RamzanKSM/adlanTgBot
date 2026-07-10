@@ -12,10 +12,10 @@ from app.bot.keyboards import (
     ADMIN_DISABLE_TARIFF_CANCEL,
     ADMIN_DISABLE_TARIFF_CONFIRM_PREFIX,
     ADMIN_DISABLE_TARIFF_SELECT_PREFIX,
-    ADMIN_GRANT_ACCESS_DAYS_BY_BUTTON,
     ADMIN_TARIFFS_BUTTON,
     admin_disable_tariff_confirm_keyboard,
     admin_disable_tariffs_keyboard,
+    is_reply_button_text,
 )
 from app.config import Settings
 from app.db.connection import open_database
@@ -63,9 +63,6 @@ class TariffSetUsageError(ValueError):
 
 class TariffSetValidationError(ValueError):
     pass
-
-
-ADMIN_GRANT_ACCESS_BUTTONS = tuple(ADMIN_GRANT_ACCESS_DAYS_BY_BUTTON)
 
 
 def parse_tariff_set_args(text: str | None) -> TariffSetArgs:
@@ -152,7 +149,7 @@ async def admin_tariffs(message: Message, settings: Settings) -> None:
     await _answer_admin_tariffs(message, settings)
 
 
-@router.message(F.text == ADMIN_TARIFFS_BUTTON)
+@router.message(F.text.func(lambda text: is_reply_button_text(text, ADMIN_TARIFFS_BUTTON)))
 async def admin_tariffs_button(message: Message, settings: Settings) -> None:
     if not _is_admin(message, settings):
         return
@@ -201,7 +198,7 @@ async def tariff_disable(message: Message, settings: Settings) -> None:
     await message.answer("Тариф отключен." if changed else "Тариф не найден.")
 
 
-@router.message(F.text == ADMIN_DISABLE_TARIFF_BUTTON)
+@router.message(F.text.func(lambda text: is_reply_button_text(text, ADMIN_DISABLE_TARIFF_BUTTON)))
 async def tariff_disable_button(message: Message, settings: Settings) -> None:
     if not _is_admin(message, settings):
         return
@@ -287,25 +284,3 @@ async def grant_access(message: Message, settings: Settings) -> None:
         f"{format_datetime_moscow(grant.user.access_until)}."
     )
 
-
-@router.message(F.text.in_(ADMIN_GRANT_ACCESS_BUTTONS))
-async def grant_access_self_button(message: Message, settings: Settings) -> None:
-    if not _is_admin(message, settings) or message.from_user is None:
-        return
-    duration_days = ADMIN_GRANT_ACCESS_DAYS_BY_BUTTON[message.text or ""]
-    async with open_database(settings.database_path) as db:
-        grant = await grant_manual_access(
-            db,
-            telegram_user_id=message.from_user.id,
-            duration_days=duration_days,
-            granted_by_telegram_user_id=message.from_user.id,
-            username=message.from_user.username,
-            first_name=message.from_user.first_name,
-            last_name=message.from_user.last_name,
-        )
-        await db.commit()
-
-    await message.answer(
-        f"Доступ выдан вам на {duration_days} дн. до "
-        f"{format_datetime_moscow(grant.user.access_until)}."
-    )

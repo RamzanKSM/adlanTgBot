@@ -3,12 +3,10 @@ from app.bot.keyboards import (
     ADMIN_DISABLE_TARIFF_CONFIRM_PREFIX,
     ADMIN_DISABLE_TARIFF_SELECT_PREFIX,
     ADMIN_DISABLE_TARIFF_BUTTON,
-    ADMIN_GRANT_ACCESS_30_BUTTON,
-    ADMIN_GRANT_ACCESS_7_BUTTON,
-    ADMIN_GRANT_ACCESS_90_BUTTON,
     ADMIN_TARIFFS_BUTTON,
     USER_ACCESS_BUTTON,
     USER_DOCUMENTS_BUTTON,
+    USER_MENU_BUTTON,
     USER_SUPPORT_BUTTON,
     USER_TARIFFS_BUTTON,
     admin_disable_tariff_confirm_keyboard,
@@ -17,6 +15,7 @@ from app.bot.keyboards import (
     documents_keyboard,
     main_menu_keyboard,
     payment_agreement_keyboard,
+    reply_text_key,
     tariffs_keyboard,
 )
 from app.db.repositories import TariffRecord
@@ -52,14 +51,21 @@ def test_main_menu_keyboard_adds_admin_rows_only_for_admins() -> None:
     admin_rows = [[button.text for button in row] for row in admin_keyboard.keyboard]
 
     assert user_rows == [
+        [USER_MENU_BUTTON],
         [USER_TARIFFS_BUTTON, USER_ACCESS_BUTTON],
         [USER_DOCUMENTS_BUTTON, USER_SUPPORT_BUTTON],
     ]
     assert [ADMIN_TARIFFS_BUTTON, ADMIN_DISABLE_TARIFF_BUTTON] not in user_rows
     assert admin_rows == user_rows + [
         [ADMIN_TARIFFS_BUTTON, ADMIN_DISABLE_TARIFF_BUTTON],
-        [ADMIN_GRANT_ACCESS_7_BUTTON, ADMIN_GRANT_ACCESS_30_BUTTON, ADMIN_GRANT_ACCESS_90_BUTTON],
     ]
+    assert user_keyboard.is_persistent is True
+
+
+def test_reply_text_key_ignores_emoji_and_variation_selectors() -> None:
+    assert reply_text_key("📄 Документы") == reply_text_key("Документы")
+    assert reply_text_key("☰ Меню") == reply_text_key("Меню")
+    assert reply_text_key("Админ: список тарифов") == reply_text_key("Админ список тарифов")
 
 
 def test_documents_keyboard_contains_known_document_callbacks() -> None:

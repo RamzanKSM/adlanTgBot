@@ -7,10 +7,12 @@ from app.bot.filters import PRIVATE_CHAT_FILTER
 from app.bot.keyboards import (
     USER_ACCESS_BUTTON,
     USER_DOCUMENTS_BUTTON,
+    USER_MENU_BUTTON,
     USER_SUPPORT_BUTTON,
     USER_TARIFFS_BUTTON,
     document_page_keyboard,
     documents_keyboard,
+    is_reply_button_text,
     main_menu_keyboard,
     payment_agreement_keyboard,
     tariffs_keyboard,
@@ -74,6 +76,13 @@ async def _answer_documents(message: Message) -> None:
     await message.answer("Выберите документ:", reply_markup=documents_keyboard())
 
 
+async def _answer_menu(message: Message, settings: Settings) -> None:
+    await message.answer(
+        "Выберите действие на клавиатуре.",
+        reply_markup=main_menu_keyboard(is_admin=_is_admin(message, settings)),
+    )
+
+
 async def _answer_access(message: Message, settings: Settings) -> None:
     if message.from_user is None:
         return
@@ -130,7 +139,7 @@ async def tariffs(message: Message, settings: Settings) -> None:
     await _answer_tariffs(message, settings)
 
 
-@router.message(F.text == USER_TARIFFS_BUTTON)
+@router.message(F.text.func(lambda text: is_reply_button_text(text, USER_TARIFFS_BUTTON)))
 async def tariffs_button(message: Message, settings: Settings) -> None:
     await _answer_tariffs(message, settings)
 
@@ -181,7 +190,7 @@ async def pay_tariff(callback: CallbackQuery, settings: Settings, lava_client: L
     await callback.answer()
 
 
-@router.message(F.text == USER_DOCUMENTS_BUTTON)
+@router.message(F.text.func(lambda text: is_reply_button_text(text, USER_DOCUMENTS_BUTTON)))
 async def documents_button(message: Message) -> None:
     await _answer_documents(message)
 
@@ -245,7 +254,7 @@ async def payment_legal_document_page(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.message(F.text == USER_SUPPORT_BUTTON)
+@router.message(F.text.func(lambda text: is_reply_button_text(text, USER_SUPPORT_BUTTON)))
 async def support_button(message: Message) -> None:
     await message.answer("Поддержка: @gymvash\nОбычно отвечаем в течение 12 часов.")
 
@@ -255,6 +264,16 @@ async def access(message: Message, settings: Settings) -> None:
     await _answer_access(message, settings)
 
 
-@router.message(F.text == USER_ACCESS_BUTTON)
+@router.message(F.text.func(lambda text: is_reply_button_text(text, USER_ACCESS_BUTTON)))
 async def access_button(message: Message, settings: Settings) -> None:
     await _answer_access(message, settings)
+
+
+@router.message(F.text.func(lambda text: is_reply_button_text(text, USER_MENU_BUTTON)))
+async def menu_button(message: Message, settings: Settings) -> None:
+    await _answer_menu(message, settings)
+
+
+@router.message(F.text)
+async def unknown_text(message: Message, settings: Settings) -> None:
+    await _answer_menu(message, settings)

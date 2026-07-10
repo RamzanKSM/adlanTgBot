@@ -8,26 +8,31 @@ USER_TARIFFS_BUTTON = "💳 Тарифы"
 USER_ACCESS_BUTTON = "🔐 Мой доступ"
 USER_DOCUMENTS_BUTTON = "📄 Документы"
 USER_SUPPORT_BUTTON = "🛟 Поддержка"
+USER_MENU_BUTTON = "☰ Меню"
 
 ADMIN_TARIFFS_BUTTON = "Админ: список тарифов"
 ADMIN_DISABLE_TARIFF_BUTTON = "Админ: отключить тариф"
-ADMIN_GRANT_ACCESS_7_BUTTON = "Админ: доступ 7 дней"
-ADMIN_GRANT_ACCESS_30_BUTTON = "Админ: доступ 30 дней"
-ADMIN_GRANT_ACCESS_90_BUTTON = "Админ: доступ 90 дней"
-
-ADMIN_GRANT_ACCESS_DAYS_BY_BUTTON = {
-    ADMIN_GRANT_ACCESS_7_BUTTON: 7,
-    ADMIN_GRANT_ACCESS_30_BUTTON: 30,
-    ADMIN_GRANT_ACCESS_90_BUTTON: 90,
-}
 
 ADMIN_DISABLE_TARIFF_SELECT_PREFIX = "adtd:s:"
 ADMIN_DISABLE_TARIFF_CONFIRM_PREFIX = "adtd:c:"
 ADMIN_DISABLE_TARIFF_CANCEL = "adtd:x"
 
 
+def reply_text_key(text: str | None) -> str:
+    if text is None:
+        return ""
+    return "".join(char for char in text.casefold().replace("\ufe0f", "") if char.isalnum())
+
+
+def is_reply_button_text(text: str | None, button_text: str) -> bool:
+    return reply_text_key(text) == reply_text_key(button_text)
+
+
 def main_menu_keyboard(*, is_admin: bool = False) -> ReplyKeyboardMarkup:
     keyboard = [
+        [
+            KeyboardButton(text=USER_MENU_BUTTON),
+        ],
         [
             KeyboardButton(text=USER_TARIFFS_BUTTON),
             KeyboardButton(text=USER_ACCESS_BUTTON),
@@ -44,14 +49,14 @@ def main_menu_keyboard(*, is_admin: bool = False) -> ReplyKeyboardMarkup:
                     KeyboardButton(text=ADMIN_TARIFFS_BUTTON),
                     KeyboardButton(text=ADMIN_DISABLE_TARIFF_BUTTON),
                 ],
-                [
-                    KeyboardButton(text=ADMIN_GRANT_ACCESS_7_BUTTON),
-                    KeyboardButton(text=ADMIN_GRANT_ACCESS_30_BUTTON),
-                    KeyboardButton(text=ADMIN_GRANT_ACCESS_90_BUTTON),
-                ],
             ]
         )
-    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, input_field_placeholder="Выберите действие")
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Выберите действие",
+    )
 
 
 def tariffs_keyboard(tariffs: list[TariffRecord]) -> InlineKeyboardMarkup:
