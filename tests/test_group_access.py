@@ -176,7 +176,7 @@ async def test_expired_access_sends_private_message_after_successful_removal(tmp
     assert event is not None
     assert event["event_type"] == "access_expired_removed"
     assert bot.sent_messages == [
-        (123, "Доступ закончился, вы удалены из группы. Продлить доступ можно через /tariffs.")
+        (123, "Доступ закончился, вы удалены из группы. Продлить доступ можно через кнопку «💳 Тарифы».")
     ]
 
 

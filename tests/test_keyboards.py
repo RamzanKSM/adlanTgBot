@@ -6,7 +6,6 @@ from app.bot.keyboards import (
     ADMIN_TARIFFS_BUTTON,
     USER_ACCESS_BUTTON,
     USER_DOCUMENTS_BUTTON,
-    USER_MENU_BUTTON,
     USER_SUPPORT_BUTTON,
     USER_TARIFFS_BUTTON,
     admin_disable_tariff_confirm_keyboard,
@@ -51,7 +50,6 @@ def test_main_menu_keyboard_adds_admin_rows_only_for_admins() -> None:
     admin_rows = [[button.text for button in row] for row in admin_keyboard.keyboard]
 
     assert user_rows == [
-        [USER_MENU_BUTTON],
         [USER_TARIFFS_BUTTON, USER_ACCESS_BUTTON],
         [USER_DOCUMENTS_BUTTON, USER_SUPPORT_BUTTON],
     ]
@@ -64,7 +62,6 @@ def test_main_menu_keyboard_adds_admin_rows_only_for_admins() -> None:
 
 def test_reply_text_key_ignores_emoji_and_variation_selectors() -> None:
     assert reply_text_key("📄 Документы") == reply_text_key("Документы")
-    assert reply_text_key("☰ Меню") == reply_text_key("Меню")
     assert reply_text_key("Админ: список тарифов") == reply_text_key("Админ список тарифов")
 
 

@@ -142,13 +142,6 @@ async def _answer_disable_tariff_list(message: Message, settings: Settings) -> N
     await message.answer("Выберите тариф для отключения:", reply_markup=admin_disable_tariffs_keyboard(tariffs))
 
 
-@router.message(Command("admin_tariffs"))
-async def admin_tariffs(message: Message, settings: Settings) -> None:
-    if not _is_admin(message, settings):
-        return
-    await _answer_admin_tariffs(message, settings)
-
-
 @router.message(F.text.func(lambda text: is_reply_button_text(text, ADMIN_TARIFFS_BUTTON)))
 async def admin_tariffs_button(message: Message, settings: Settings) -> None:
     if not _is_admin(message, settings):
@@ -182,20 +175,6 @@ async def tariff_set(message: Message, settings: Settings) -> None:
         )
         await db.commit()
     await message.answer(f"Тариф сохранен: {tariff.code}")
-
-
-@router.message(Command("tariff_disable"))
-async def tariff_disable(message: Message, settings: Settings) -> None:
-    if not _is_admin(message, settings):
-        return
-    code = (message.text or "").partition(" ")[2].strip()
-    if not code:
-        await message.answer("Формат: /tariff_disable CODE")
-        return
-    async with open_database(settings.database_path) as db:
-        changed = await TariffsRepository(db).set_active(code, False)
-        await db.commit()
-    await message.answer("Тариф отключен." if changed else "Тариф не найден.")
 
 
 @router.message(F.text.func(lambda text: is_reply_button_text(text, ADMIN_DISABLE_TARIFF_BUTTON)))
@@ -283,4 +262,3 @@ async def grant_access(message: Message, settings: Settings) -> None:
         f"Доступ выдан пользователю {grant.user.telegram_user_id} до "
         f"{format_datetime_moscow(grant.user.access_until)}."
     )
-

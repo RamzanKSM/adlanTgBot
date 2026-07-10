@@ -84,7 +84,7 @@ async def warn_and_expire_access(settings: Settings, bot: Bot) -> None:
                 try:
                     await bot.send_message(
                         user.telegram_user_id,
-                        "Доступ закончился, вы удалены из группы. Продлить доступ можно через /tariffs.",
+                        "Доступ закончился, вы удалены из группы. Продлить доступ можно через кнопку «💳 Тарифы».",
                     )
                 except (TelegramBadRequest, TelegramForbiddenError) as exc:
                     logger.info(

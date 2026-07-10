@@ -8,7 +8,6 @@ USER_TARIFFS_BUTTON = "💳 Тарифы"
 USER_ACCESS_BUTTON = "🔐 Мой доступ"
 USER_DOCUMENTS_BUTTON = "📄 Документы"
 USER_SUPPORT_BUTTON = "🛟 Поддержка"
-USER_MENU_BUTTON = "☰ Меню"
 
 ADMIN_TARIFFS_BUTTON = "Админ: список тарифов"
 ADMIN_DISABLE_TARIFF_BUTTON = "Админ: отключить тариф"
@@ -30,9 +29,6 @@ def is_reply_button_text(text: str | None, button_text: str) -> bool:
 
 def main_menu_keyboard(*, is_admin: bool = False) -> ReplyKeyboardMarkup:
     keyboard = [
-        [
-            KeyboardButton(text=USER_MENU_BUTTON),
-        ],
         [
             KeyboardButton(text=USER_TARIFFS_BUTTON),
             KeyboardButton(text=USER_ACCESS_BUTTON),
