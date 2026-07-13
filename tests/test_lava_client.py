@@ -28,6 +28,11 @@ def _signature(secret: str, body: str | bytes) -> str:
     return hmac.new(secret.encode(), body_bytes, hashlib.sha256).hexdigest()
 
 
+def _webhook_signature(secret: str, payload: dict[str, object]) -> str:
+    body = json.dumps(dict(sorted(payload.items())), ensure_ascii=False, separators=(",", ":"))
+    return _signature(secret, body)
+
+
 @pytest.mark.asyncio
 async def test_create_invoice_posts_business_payload_with_signature() -> None:
     seen: dict[str, object] = {}
@@ -143,15 +148,36 @@ async def test_get_invoice_status_treats_not_found_as_unknown_without_raising() 
 
 
 def test_verify_webhook_uses_additional_key() -> None:
-    body = b'{"invoice_id":"lava-invoice-1","order_id":"order-1","status":"success"}'
+    payload = {"invoice_id": "lava-invoice-1", "order_id": "order-1", "status": "success"}
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
     client = LavaClient(_settings())
 
-    assert client.verify_webhook(body, _signature("additional-key", body))
-    assert not client.verify_webhook(body, _signature("secret-key", body))
+    assert client.verify_webhook(body, _webhook_signature("additional-key", payload))
+    assert client.verify_webhook(body, f"Bearer {_webhook_signature('additional-key', payload)}")
+    assert not client.verify_webhook(body, _webhook_signature("secret-key", payload))
     assert not LavaClient(_settings(lava_additional_key="")).verify_webhook(
         body,
-        _signature("additional-key", body),
+        _webhook_signature("additional-key", payload),
     )
+
+
+def test_verify_webhook_matches_official_lava_sdk_example() -> None:
+    payload = {
+        "invoice_id": "18cf0c0b-6539-4d7c-b3e9-479e4922b87c",
+        "status": "success",
+        "pay_time": "2022-11-08 11:26:46",
+        "amount": "1.00",
+        "order_id": "636a3c2f3e82b",
+        "pay_service": "card",
+        "payer_details": "553691******8079",
+        "custom_fields": "test",
+        "type": 1,
+        "credited": "1.00",
+    }
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    client = LavaClient(_settings(lava_additional_key="f4b91efb9b8da35737fcd97ab123c74566f9a654"))
+
+    assert client.verify_webhook(body, "b0b011552beb994cc04401e088db7b296796a07fc76976b632518fe146ffa330")
 
 
 def test_normalize_payload_understands_business_webhook() -> None:

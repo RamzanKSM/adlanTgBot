@@ -145,13 +145,11 @@ class LavaClient:
     def verify_webhook(self, body: bytes, signature: str | None) -> bool:
         if not self._additional_key or not signature:
             return False
-        expected = hmac.new(
-            self._additional_key.encode(),
-            body,
-            hashlib.sha256,
-        ).hexdigest()
-        supplied = signature.strip()
-        return hmac.compare_digest(expected, supplied)
+        signed_body = _webhook_signed_body(body)
+        if signed_body is None:
+            return False
+        expected = hmac.new(self._additional_key.encode(), signed_body.encode(), hashlib.sha256).hexdigest()
+        return any(hmac.compare_digest(expected, supplied) for supplied in _signature_candidates(signature))
 
     def normalize_payload(self, payload: dict[str, Any]) -> LavaPaymentNotification:
         data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
@@ -232,6 +230,28 @@ def _optional_datetime(value: object) -> datetime | None:
         return iso_to_datetime(str(value))
     except ValueError:
         return None
+
+
+def _signature_candidates(signature: str) -> tuple[str, ...]:
+    supplied = signature.strip()
+    candidates = {supplied}
+    lower = supplied.lower()
+    for prefix in ("bearer ", "sha256=", "signature "):
+        if lower.startswith(prefix):
+            candidates.add(supplied[len(prefix) :].strip())
+    if " " in supplied:
+        candidates.add(supplied.rsplit(" ", 1)[-1].strip())
+    return tuple(candidate for candidate in candidates if candidate)
+
+
+def _webhook_signed_body(body: bytes) -> str | None:
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return json.dumps(dict(sorted(payload.items())), ensure_ascii=False, separators=(",", ":"))
 
 
 def _response_payload(response: httpx.Response) -> dict[str, Any]:
