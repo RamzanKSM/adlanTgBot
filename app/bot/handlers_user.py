@@ -29,6 +29,10 @@ from app.utils.datetime import format_datetime_moscow, utc_now
 router = Router(name="user")
 router.message.filter(PRIVATE_CHAT_FILTER)
 
+SUPPORT_TEXT = "👤 Поддержка: @gymvash\nОбычно отвечаем в течение 12 часов."
+DOCUMENTS_PROMPT = "📄 Выберите документ:"
+NO_ACTIVE_ACCESS_TEXT = "❌ Активного доступа нет. Нажмите «💳 Тарифы», чтобы выбрать тариф."
+
 
 def _is_admin(message: Message, settings: Settings) -> bool:
     user = message.from_user
@@ -72,7 +76,7 @@ async def _show_payment_agreement(callback: CallbackQuery, settings: Settings, t
 
 
 async def _answer_documents(message: Message) -> None:
-    await message.answer("Выберите документ:", reply_markup=documents_keyboard())
+    await message.answer(DOCUMENTS_PROMPT, reply_markup=documents_keyboard())
 
 
 async def _answer_menu(message: Message, settings: Settings) -> None:
@@ -97,7 +101,7 @@ async def _answer_access(message: Message, settings: Settings) -> None:
             )
         if user.access_until is None or user.access_until <= utc_now():
             await db.commit()
-            await message.answer(f"Активного доступа нет. Нажмите «{USER_TARIFFS_BUTTON}», чтобы выбрать тариф.")
+            await message.answer(NO_ACTIVE_ACCESS_TEXT)
             return
         invite_service = InviteService(db, settings, message.bot)
         try:
@@ -194,7 +198,7 @@ async def documents_button(message: Message) -> None:
 @router.callback_query(F.data == "docs:list")
 async def documents_list(callback: CallbackQuery) -> None:
     if isinstance(callback.message, Message):
-        await callback.message.edit_text("Выберите документ:", reply_markup=documents_keyboard())
+        await callback.message.edit_text(DOCUMENTS_PROMPT, reply_markup=documents_keyboard())
     await callback.answer()
 
 
@@ -252,7 +256,7 @@ async def payment_legal_document_page(callback: CallbackQuery) -> None:
 
 @router.message(F.text.func(lambda text: is_reply_button_text(text, USER_SUPPORT_BUTTON)))
 async def support_button(message: Message) -> None:
-    await message.answer("Поддержка: @gymvash\nОбычно отвечаем в течение 12 часов.")
+    await message.answer(SUPPORT_TEXT)
 
 
 @router.message(F.text.func(lambda text: is_reply_button_text(text, USER_ACCESS_BUTTON)))

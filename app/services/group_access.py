@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import logging
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError
 
 from app.config import Settings
 
@@ -36,7 +36,7 @@ async def can_remove_from_group(bot: Bot, settings: Settings, telegram_user_id: 
 
     try:
         member = await bot.get_chat_member(settings.telegram_group_id, telegram_user_id)
-    except TelegramBadRequest as exc:
+    except TelegramAPIError as exc:
         logger.warning("group_member_status_unverified user_id=%s error=%s", telegram_user_id, exc)
         return GroupRemovalSafety(can_remove=False, reason="unverified", error=str(exc))
 

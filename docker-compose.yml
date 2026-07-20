@@ -1,4 +1,16 @@
 services:
+  migrate:
+    image: adlan-tg-bot:latest
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/bot.sqlite3
+    command: ["python", "-m", "app.db.migrations"]
+    volumes:
+      - /root/adlanbot/data:/app/data
+    restart: "no"
+
   api:
     image: adlan-tg-bot:latest
     build: .
@@ -6,12 +18,10 @@ services:
       - .env
     environment:
       DATABASE_PATH: /app/data/bot.sqlite3
-    command:
-      [
-        "sh",
-        "-c",
-        "python -m app.db.migrations && uvicorn app.api.app:create_app --factory --host 0.0.0.0 --port 8000",
-      ]
+    command: ["uvicorn", "app.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "8000:8000"
     volumes:
@@ -38,6 +48,9 @@ services:
     environment:
       DATABASE_PATH: /app/data/bot.sqlite3
     command: ["python", "-m", "app.main"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     volumes:
       - /root/adlanbot/data:/app/data
     restart: unless-stopped
