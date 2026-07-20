@@ -11,19 +11,20 @@ from aiogram.types import (
 )
 
 from app.config import Settings
+from app.messages import message
 
 
 logger = logging.getLogger(__name__)
 
 
 USER_COMMANDS = [
-    BotCommand(command="start", description="Начать работу с ботом"),
+    BotCommand(command="start", description=message("command.start")),
 ]
 
 ADMIN_COMMANDS = [
     *USER_COMMANDS,
-    BotCommand(command="tariff_set", description='Создать тариф: код "Название" цена дни'),
-    BotCommand(command="grant_access", description="Выдать доступ вручную"),
+    BotCommand(command="tariff_set", description=message("command.tariff_set")),
+    BotCommand(command="grant_access", description=message("command.grant_access")),
 ]
 
 

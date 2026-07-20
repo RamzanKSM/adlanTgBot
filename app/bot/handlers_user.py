@@ -20,6 +20,7 @@ from app.config import Settings
 from app.db.connection import open_database
 from app.db.repositories import TariffRecord, TariffsRepository, UsersRepository
 from app.legal.documents import load_legal_document_page, render_legal_document_page
+from app.messages import message as text
 from app.services.invites import InviteService
 from app.services.lava import LavaClient
 from app.services.payments import PaymentService
@@ -29,9 +30,9 @@ from app.utils.datetime import format_datetime_moscow, utc_now
 router = Router(name="user")
 router.message.filter(PRIVATE_CHAT_FILTER)
 
-SUPPORT_TEXT = "👤 Поддержка: @gymvash\nОбычно отвечаем в течение 12 часов."
-DOCUMENTS_PROMPT = "📄 Выберите документ:"
-NO_ACTIVE_ACCESS_TEXT = "❌ Активного доступа нет. Нажмите «💳 Тарифы», чтобы выбрать тариф."
+SUPPORT_TEXT = text("user.support")
+DOCUMENTS_PROMPT = text("user.documents_prompt")
+NO_ACTIVE_ACCESS_TEXT = text("user.no_active_access")
 
 
 def _is_admin(message: Message, settings: Settings) -> bool:
@@ -45,19 +46,18 @@ async def _answer_tariffs(message: Message, settings: Settings) -> None:
     async with open_database(settings.database_path) as db:
         items = await TariffsRepository(db).list_active()
     if not items:
-        await message.answer("Активных тарифов пока нет.")
+        await message.answer(text("user.tariffs_empty"))
         return
-    await message.answer("Выберите тариф:", reply_markup=tariffs_keyboard(items))
+    await message.answer(text("user.tariffs_prompt"), reply_markup=tariffs_keyboard(items))
 
 
 def _payment_agreement_text(tariff: TariffRecord) -> str:
-    return (
-        "Перед оплатой ознакомьтесь с документами.\n\n"
-        f"Тариф: {tariff.title}\n"
-        f"Стоимость: {tariff.price_amount} {tariff.currency}\n"
-        f"Срок доступа: {tariff.duration_days} дн.\n\n"
-        "Нажимая «✅ Принимаю и перейти к оплате», вы подтверждаете, что принимаете "
-        "публичную оферту, политику конфиденциальности, условия возврата и правила сообщества."
+    return text(
+        "user.payment_agreement",
+        title=tariff.title,
+        price_amount=tariff.price_amount,
+        currency=tariff.currency,
+        duration_days=tariff.duration_days,
     )
 
 
@@ -65,7 +65,7 @@ async def _show_payment_agreement(callback: CallbackQuery, settings: Settings, t
     async with open_database(settings.database_path) as db:
         tariff = await TariffsRepository(db).get_by_code(tariff_code, active_only=True)
     if tariff is None:
-        await callback.answer("Тариф не найден или отключен.", show_alert=True)
+        await callback.answer(text("user.tariff_not_found"), show_alert=True)
         return
     if isinstance(callback.message, Message):
         await callback.message.edit_text(
@@ -81,7 +81,7 @@ async def _answer_documents(message: Message) -> None:
 
 async def _answer_menu(message: Message, settings: Settings) -> None:
     await message.answer(
-        "Выберите действие на клавиатуре.",
+        text("user.choose_action"),
         reply_markup=main_menu_keyboard(is_admin=_is_admin(message, settings)),
     )
 
@@ -107,15 +107,14 @@ async def _answer_access(message: Message, settings: Settings) -> None:
         try:
             link = await invite_service.ensure_personal_invite(message.from_user.id)
         except TelegramBadRequest:
-            await message.answer(
-                "Доступ активен, но не удалось создать ссылку в группу. "
-                "Проверьте TELEGRAM_GROUP_ID и права бота в группе."
-            )
+            await message.answer(text("user.access_invite_error"))
             return
         if link:
-            await message.answer(f"Доступ активен до {format_datetime_moscow(user.access_until)}.\nВаша ссылка: {link}")
+            await message.answer(
+                text("user.access_with_link", access_until=format_datetime_moscow(user.access_until), link=link)
+            )
         else:
-            await message.answer(f"Доступ активен до {format_datetime_moscow(user.access_until)}. Вы уже в группе.")
+            await message.answer(text("user.access_already_member", access_until=format_datetime_moscow(user.access_until)))
 
 
 @router.message(CommandStart())
@@ -132,9 +131,7 @@ async def start(message: Message, settings: Settings) -> None:
         )
         await db.commit()
     await message.answer(
-        "Добро пожаловать! Я помогу оформить доступ в закрытое Telegram-сообщество.\n\n"
-        "Выберите действие на клавиатуре: посмотрите тарифы, проверьте доступ, откройте документы "
-        "или напишите в поддержку.",
+        text("user.welcome"),
         reply_markup=main_menu_keyboard(is_admin=_is_admin(message, settings)),
     )
 
@@ -178,14 +175,11 @@ async def pay_tariff(callback: CallbackQuery, settings: Settings, lava_client: L
             return
     if created.payment.provider == "mock":
         await callback.message.answer(
-            "Создан mock-платеж для локальной разработки. Это не реальная оплата.\n"
-            "Для подтверждения откройте локальную ссылку:\n"
-            f"{created.payment_url}"
+            text("user.mock_payment_created", payment_url=created.payment_url)
         )
     else:
         await callback.message.answer(
-            "Ссылка на оплату создана. После оплаты бот дождется webhook/status от Lava и сам выдаст доступ.\n"
-            f"{created.payment_url}"
+            text("user.payment_link_created", payment_url=created.payment_url)
         )
     await callback.answer()
 
@@ -208,17 +202,17 @@ async def legal_document_page(callback: CallbackQuery) -> None:
         return
     parts = callback.data.split(":")
     if len(parts) != 3:
-        await callback.answer("Документ не найден.", show_alert=True)
+        await callback.answer(text("user.document_not_found"), show_alert=True)
         return
     _, document_key, raw_page = parts
     try:
         page_number = int(raw_page)
     except ValueError:
-        await callback.answer("Документ не найден.", show_alert=True)
+        await callback.answer(text("user.document_not_found"), show_alert=True)
         return
     page = load_legal_document_page(document_key, page_number)
     if page is None:
-        await callback.answer("Документ не найден.", show_alert=True)
+        await callback.answer(text("user.document_not_found"), show_alert=True)
         return
     if isinstance(callback.message, Message):
         await callback.message.edit_text(
@@ -235,16 +229,16 @@ async def payment_legal_document_page(callback: CallbackQuery) -> None:
     try:
         tariff_code, document_key, raw_page = callback.data.removeprefix("pdoc:").rsplit(":", 2)
     except ValueError:
-        await callback.answer("Документ не найден.", show_alert=True)
+        await callback.answer(text("user.document_not_found"), show_alert=True)
         return
     try:
         page_number = int(raw_page)
     except ValueError:
-        await callback.answer("Документ не найден.", show_alert=True)
+        await callback.answer(text("user.document_not_found"), show_alert=True)
         return
     page = load_legal_document_page(document_key, page_number)
     if page is None:
-        await callback.answer("Документ не найден.", show_alert=True)
+        await callback.answer(text("user.document_not_found"), show_alert=True)
         return
     if isinstance(callback.message, Message):
         await callback.message.edit_text(

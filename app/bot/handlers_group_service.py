@@ -6,6 +6,7 @@ from aiogram.types import Message, User
 from app.config import Settings
 from app.db.connection import open_database
 from app.db.repositories import AccessEventsRepository
+from app.messages import message as text
 from app.services.admin_notify import notify_admins
 
 
@@ -71,6 +72,5 @@ async def delete_join_service_message(message: Message, settings: Settings) -> N
         await notify_admins(
             settings,
             message.bot,
-            "Не удалось удалить сервисное сообщение о входе в группу. "
-            "Проверьте у бота право Delete messages / Удаление сообщений.",
+            text("admin.group_service_delete_failed"),
         )

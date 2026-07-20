@@ -4,6 +4,7 @@ from aiogram.types import ChatMemberUpdated, User
 from app.config import Settings
 from app.db.connection import open_database
 from app.db.repositories import AccessEventsRepository, InviteLinksRepository, UsersRepository
+from app.messages import message
 from app.services.admin_notify import notify_admins
 from app.services.group_access import can_remove_from_group
 from app.utils.datetime import utc_now
@@ -28,7 +29,12 @@ def _user_details(user: User) -> dict[str, object]:
 def _format_user(user: User) -> str:
     username = f" @{user.username}" if user.username else ""
     name = " ".join(part for part in (user.first_name, user.last_name) if part).strip()
-    return f"{name or 'Без имени'}{username} (ID: {user.id})"
+    return message(
+        "admin.participant",
+        name=name or message("admin.unnamed_user"),
+        username=username,
+        user_id=user.id,
+    )
 
 
 def _has_active_access(user: object) -> bool:
@@ -149,8 +155,12 @@ async def on_chat_member(event: ChatMemberUpdated, settings: Settings) -> None:
                 await notify_admins(
                     settings,
                     event.bot,
-                    f"Вход по чужой персональной ссылке: {_format_user(participant)}. "
-                    f"Ожидаемый плательщик ID: {expected_user.telegram_user_id}. Действие: {action}.",
+                    message(
+                        "admin.group_join_wrong_personal_invite",
+                        participant=_format_user(participant),
+                        expected_user_id=expected_user.telegram_user_id,
+                        action=action,
+                    ),
                 )
                 return
 
@@ -167,7 +177,7 @@ async def on_chat_member(event: ChatMemberUpdated, settings: Settings) -> None:
                 await notify_admins(
                     settings,
                     event.bot,
-                    f"Штатный вход в группу: {_format_user(participant)} по персональной ссылке.",
+                    message("admin.group_join_expected_user", participant=_format_user(participant)),
                 )
                 return
 
@@ -192,12 +202,19 @@ async def on_chat_member(event: ChatMemberUpdated, settings: Settings) -> None:
                 await notify_admins(
                     settings,
                     event.bot,
-                    f"Вход по персональной ссылке после окончания доступа: {_format_user(participant)}. "
-                    f"Действие: {action}.",
+                    message(
+                        "admin.group_join_expired_personal_invite",
+                        participant=_format_user(participant),
+                        action=action,
+                    ),
                 )
                 return
 
-            event_type = "group_join_untracked_invite" if _has_active_access(known_user) else "group_join_untracked_invite_no_active_access"
+            event_type = (
+                "group_join_untracked_invite"
+                if _has_active_access(known_user)
+                else "group_join_untracked_invite_no_active_access"
+            )
             untracked_details = {**details, "tracked_invite": False}
             if _has_active_access(known_user):
                 await users.set_is_in_group(telegram_user_id, True)
@@ -215,7 +232,7 @@ async def on_chat_member(event: ChatMemberUpdated, settings: Settings) -> None:
             await notify_admins(
                 settings,
                 event.bot,
-                f"Вход по неотслеживаемой ссылке: {_format_user(participant)}. Действие: {action}.",
+                message("admin.group_join_untracked_invite", participant=_format_user(participant), action=action),
             )
             return
 
@@ -239,5 +256,5 @@ async def on_chat_member(event: ChatMemberUpdated, settings: Settings) -> None:
         await notify_admins(
             settings,
             event.bot,
-            f"Вход в группу без invite-ссылки: {_format_user(participant)}. Действие: {action}.",
+            message("admin.group_join_without_invite", participant=_format_user(participant), action=action),
         )

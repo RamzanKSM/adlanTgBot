@@ -7,6 +7,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from app.config import Settings
 from app.db.connection import open_database
 from app.db.repositories import AccessEventsRepository, UsersRepository
+from app.messages import message
 from app.services.group_access import can_remove_from_group
 from app.utils.datetime import datetime_to_iso, format_datetime_moscow, utc_now
 
@@ -27,8 +28,7 @@ async def warn_and_expire_access(settings: Settings, bot: Bot) -> None:
             try:
                 await bot.send_message(
                     user.telegram_user_id,
-                    f"Доступ в группу закончится {format_datetime_moscow(user.access_until)}. "
-                    "Продлите доступ заранее.",
+                    message("access.warning", access_until=format_datetime_moscow(user.access_until)),
                 )
             finally:
                 await users.mark_warned(user.id, user.access_until)
@@ -84,7 +84,7 @@ async def warn_and_expire_access(settings: Settings, bot: Bot) -> None:
                 try:
                     await bot.send_message(
                         user.telegram_user_id,
-                        "Доступ закончился, вы удалены из группы. Продлить доступ можно через кнопку «💳 Тарифы».",
+                        message("access.expired_removed"),
                     )
                 except (TelegramBadRequest, TelegramForbiddenError) as exc:
                     logger.info(

@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 from app.db.connection import open_database
+from app.messages import message
 from app.services.invites import InviteService
 from app.services.payments import PaymentService
 
@@ -30,11 +31,11 @@ async def lava_webhook(request: Request) -> dict[str, str]:
             invite_service = InviteService(db, settings, bot)
             link = await invite_service.ensure_personal_invite(result.telegram_user_id, result.payment_id)
             if link:
-                await bot.send_message(result.telegram_user_id, f"Оплата получена. Ваша ссылка в группу: {link}")
+                await bot.send_message(result.telegram_user_id, message("payment.received_with_link", link=link))
 
     return {"status": "ok"}
 
 
 @router.get("/lava/success", response_class=PlainTextResponse)
 async def lava_success() -> str:
-    return "Спасибо. Платеж проверяется автоматически; эта страница не подтверждает оплату."
+    return message("api.lava_success")

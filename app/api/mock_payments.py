@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 from app.db.connection import open_database
+from app.messages import message
 from app.services.invites import InviteService
 from app.services.payments import PaymentService
 
@@ -10,10 +11,7 @@ from app.services.payments import PaymentService
 router = APIRouter()
 
 
-INVITE_ERROR_TEXT = (
-    "Mock payment paid. Access was applied, but invite link was not created. "
-    "Check TELEGRAM_GROUP_ID and bot permissions in the target group."
-)
+INVITE_ERROR_TEXT = message("api.mock_invite_error")
 
 
 @router.api_route(
@@ -31,7 +29,7 @@ INVITE_ERROR_TEXT = (
 async def mock_pay(order_id: str, request: Request) -> PlainTextResponse:
     settings = request.app.state.settings
     if not settings.is_mock_payments_enabled:
-        raise HTTPException(status_code=404, detail="mock payments are disabled")
+        raise HTTPException(status_code=404, detail=message("api.mock_disabled"))
 
     async with open_database(settings.database_path) as db:
         payment_service = PaymentService(db, settings, request.app.state.lava_client)
@@ -46,12 +44,12 @@ async def mock_pay(order_id: str, request: Request) -> PlainTextResponse:
             if link and not result.already_applied:
                 await request.app.state.bot.send_message(
                     result.telegram_user_id,
-                    f"Mock-оплата подтверждена. Ваша ссылка в группу: {link}",
+                    message("payment.received_with_link", link=link),
                 )
         except TelegramBadRequest:
             return PlainTextResponse(INVITE_ERROR_TEXT, status_code=400)
 
-    status = "already applied" if result.already_applied else "paid"
+    status = message("api.mock_status_already_applied") if result.already_applied else message("api.mock_status_paid")
     if link:
-        return PlainTextResponse(f"Mock payment {status}. Invite link: {link}")
-    return PlainTextResponse(f"Mock payment {status}. Access is active; invite link was not created.")
+        return PlainTextResponse(message("api.mock_paid_with_link", status=status, link=link))
+    return PlainTextResponse(message("api.mock_paid_without_link", status=status))

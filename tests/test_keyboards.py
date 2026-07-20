@@ -62,7 +62,7 @@ def test_main_menu_keyboard_adds_admin_rows_only_for_admins() -> None:
 
 def test_reply_text_key_ignores_emoji_and_variation_selectors() -> None:
     assert reply_text_key("📄 Документы") == reply_text_key("Документы")
-    assert reply_text_key("Админ: список тарифов") == reply_text_key("Админ список тарифов")
+    assert reply_text_key("🛠 Админ: тарифы") == reply_text_key("Админ тарифы")
 
 
 def test_documents_keyboard_contains_known_document_callbacks() -> None:
@@ -108,14 +108,14 @@ def test_admin_disable_tariffs_keyboard_uses_admin_callback_prefix() -> None:
 
     button = keyboard.inline_keyboard[0][0]
 
-    assert button.text == "7 дней (week)"
+    assert button.text == "🏷 7 дней (week)"
     assert button.callback_data == f"{ADMIN_DISABLE_TARIFF_SELECT_PREFIX}week"
 
 
 def test_admin_disable_tariff_confirm_keyboard_has_confirm_and_cancel() -> None:
     keyboard = admin_disable_tariff_confirm_keyboard("week")
 
-    assert keyboard.inline_keyboard[0][0].text == "Да, отключить"
+    assert keyboard.inline_keyboard[0][0].text == "✅ Да, отключить"
     assert keyboard.inline_keyboard[0][0].callback_data == f"{ADMIN_DISABLE_TARIFF_CONFIRM_PREFIX}week"
-    assert keyboard.inline_keyboard[1][0].text == "Отмена"
+    assert keyboard.inline_keyboard[1][0].text == "↩️ Отмена"
     assert keyboard.inline_keyboard[1][0].callback_data == ADMIN_DISABLE_TARIFF_CANCEL

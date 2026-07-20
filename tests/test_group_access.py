@@ -176,7 +176,7 @@ async def test_expired_access_sends_private_message_after_successful_removal(tmp
     assert event is not None
     assert event["event_type"] == "access_expired_removed"
     assert bot.sent_messages == [
-        (123, "Доступ закончился, вы удалены из группы. Продлить доступ можно через кнопку «💳 Тарифы».")
+        (123, "❌ Доступ закончился, вы удалены из группы.\n💳 Продлить доступ можно через кнопку «💳 Тарифы».")
     ]
 
 
@@ -191,7 +191,7 @@ async def test_access_warning_uses_human_moscow_datetime(tmp_path, monkeypatch) 
     await warn_and_expire_access(settings, bot)
 
     assert bot.sent_messages == [
-        (123, "Доступ в группу закончится 02.07.2026 02:39 МСК. Продлите доступ заранее.")
+        (123, "⏳ Доступ в группу закончится 02.07.2026 02:39 МСК.\n💳 Продлите доступ заранее.")
     ]
 
 

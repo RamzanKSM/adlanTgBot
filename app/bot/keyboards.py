@@ -2,15 +2,16 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 
 from app.db.repositories import TariffRecord
 from app.legal.documents import LEGAL_DOCUMENTS, LegalDocumentMeta
+from app.messages import message
 
 
-USER_TARIFFS_BUTTON = "💳 Тарифы"
-USER_ACCESS_BUTTON = "🔐 Мой доступ"
-USER_DOCUMENTS_BUTTON = "📄 Документы"
-USER_SUPPORT_BUTTON = "🛟 Поддержка"
+USER_TARIFFS_BUTTON = message("button.user_tariffs")
+USER_ACCESS_BUTTON = message("button.user_access")
+USER_DOCUMENTS_BUTTON = message("button.user_documents")
+USER_SUPPORT_BUTTON = message("button.user_support")
 
-ADMIN_TARIFFS_BUTTON = "Админ: список тарифов"
-ADMIN_DISABLE_TARIFF_BUTTON = "Админ: отключить тариф"
+ADMIN_TARIFFS_BUTTON = message("button.admin_tariffs")
+ADMIN_DISABLE_TARIFF_BUTTON = message("button.admin_disable_tariff")
 
 ADMIN_DISABLE_TARIFF_SELECT_PREFIX = "adtd:s:"
 ADMIN_DISABLE_TARIFF_CONFIRM_PREFIX = "adtd:c:"
@@ -51,7 +52,7 @@ def main_menu_keyboard(*, is_admin: bool = False) -> ReplyKeyboardMarkup:
         keyboard=keyboard,
         resize_keyboard=True,
         is_persistent=True,
-        input_field_placeholder="Выберите действие",
+        input_field_placeholder=message("keyboard.action_placeholder"),
     )
 
 
@@ -60,7 +61,13 @@ def tariffs_keyboard(tariffs: list[TariffRecord]) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"{tariff.title} · {tariff.price_amount} {tariff.currency} · {tariff.duration_days} дн.",
+                    text=message(
+                        "keyboard.tariff",
+                        title=tariff.title,
+                        price_amount=tariff.price_amount,
+                        currency=tariff.currency,
+                        duration_days=tariff.duration_days,
+                    ),
                     callback_data=f"buy:{tariff.code}",
                 )
             ]
@@ -87,7 +94,7 @@ def payment_agreement_keyboard(
             [InlineKeyboardButton(text=document.title, callback_data=f"pdoc:{tariff_code}:{document.key}:1")]
             for document in documents
         ]
-        + [[InlineKeyboardButton(text="✅ Принимаю и перейти к оплате", callback_data=f"pay:{tariff_code}")]]
+        + [[InlineKeyboardButton(text=message("button.payment_agree"), callback_data=f"pay:{tariff_code}")]]
     )
 
 
@@ -107,10 +114,14 @@ def document_page_keyboard(
     if navigation:
         rows.append(navigation)
     if tariff_code is None:
-        rows.append([InlineKeyboardButton(text="📄 Все документы", callback_data="docs:list")])
+        rows.append([InlineKeyboardButton(text=message("button.documents_all"), callback_data="docs:list")])
     else:
-        rows.append([InlineKeyboardButton(text="↩️ К согласию", callback_data=f"agree:{tariff_code}")])
-        rows.append([InlineKeyboardButton(text="✅ Принимаю и перейти к оплате", callback_data=f"pay:{tariff_code}")])
+        rows.append(
+            [InlineKeyboardButton(text=message("button.back_to_agreement"), callback_data=f"agree:{tariff_code}")]
+        )
+        rows.append(
+            [InlineKeyboardButton(text=message("button.payment_agree"), callback_data=f"pay:{tariff_code}")]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -119,7 +130,7 @@ def admin_disable_tariffs_keyboard(tariffs: list[TariffRecord]) -> InlineKeyboar
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"{tariff.title} ({tariff.code})",
+                    text=message("keyboard.admin_tariff", title=tariff.title, code=tariff.code),
                     callback_data=f"{ADMIN_DISABLE_TARIFF_SELECT_PREFIX}{tariff.code}",
                 )
             ]
@@ -133,13 +144,13 @@ def admin_disable_tariff_confirm_keyboard(code: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Да, отключить",
+                    text=message("button.disable_confirm"),
                     callback_data=f"{ADMIN_DISABLE_TARIFF_CONFIRM_PREFIX}{code}",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Отмена",
+                    text=message("button.cancel"),
                     callback_data=ADMIN_DISABLE_TARIFF_CANCEL,
                 )
             ],

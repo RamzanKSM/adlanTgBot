@@ -13,6 +13,7 @@ from app.db.repositories import (
     TariffsRepository,
     UsersRepository,
 )
+from app.messages import message
 from app.services.access import AccessExtension, calculate_access_extension
 from app.services.lava import LavaClient, LavaPaymentNotification
 from app.utils.datetime import datetime_to_iso, utc_now
@@ -46,10 +47,10 @@ class PaymentService:
     async def create_payment_for_tariff(self, telegram_user_id: int, tariff_code: str) -> CreatedPayment:
         user = await self.users.get_by_telegram_id(telegram_user_id)
         if user is None:
-            raise ValueError("user is not registered")
+            raise ValueError(message("payment.user_not_registered"))
         tariff = await self.tariffs.get_by_code(tariff_code, active_only=True)
         if tariff is None:
-            raise ValueError("tariff is not active")
+            raise ValueError(message("payment.tariff_not_active"))
 
         order_id = uuid4().hex
         expires_at = utc_now() + timedelta(hours=1)
@@ -82,7 +83,11 @@ class PaymentService:
             order_id=order_id,
             amount=tariff.price_amount,
             currency=tariff.currency,
-            description=f"{tariff.title} ({tariff.duration_days} days)",
+            description=message(
+                "payment.invoice_description",
+                title=tariff.title,
+                duration_days=tariff.duration_days,
+            ),
             success_url=success_url,
             webhook_url=webhook_url,
         )
@@ -115,7 +120,7 @@ class PaymentService:
         order_id = _notification_order_id(notification)
         invoice_id = _notification_invoice_id(notification)
         if not order_id and not invoice_id:
-            raise ValueError("payment notification has no invoice id")
+            raise ValueError(message("payment.notification_without_invoice"))
 
         paid_at = notification.paid_at or utc_now()
         await self.db.execute("BEGIN IMMEDIATE")
@@ -126,14 +131,14 @@ class PaymentService:
             if payment is None and invoice_id:
                 payment = await self.payments.get_by_invoice_id(invoice_id)
             if payment is None:
-                raise ValueError("payment is not found")
+                raise ValueError(message("payment.not_found"))
             if expected_provider is not None and payment.provider != expected_provider:
-                raise ValueError("payment provider does not match")
+                raise ValueError(message("payment.provider_mismatch"))
 
             user = await self.users.get_by_id(payment.user_id)
             tariff = await self.tariffs.get_by_id(payment.tariff_id)
             if user is None or tariff is None:
-                raise ValueError("payment references missing user or tariff")
+                raise ValueError(message("payment.references_missing"))
 
             if payment.applied_at is not None:
                 await self.db.commit()

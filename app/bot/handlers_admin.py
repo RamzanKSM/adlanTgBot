@@ -20,6 +20,7 @@ from app.bot.keyboards import (
 from app.config import Settings
 from app.db.connection import open_database
 from app.db.repositories import TariffsRepository
+from app.messages import message as text
 from app.services.access import grant_manual_access
 from app.utils.datetime import format_datetime_moscow
 
@@ -28,22 +29,7 @@ router = Router(name="admin")
 router.message.filter(PRIVATE_CHAT_FILTER)
 
 
-TARIFF_SET_USAGE = """Как создать тариф:
-Формат: /tariff_set CODE "Название" PRICE DURATION_DAYS [CURRENCY] [sort_order] [description]
-
-Аргументы:
-- CODE - короткий код тарифа без пробелов, например week или month.
-- "Название" - название тарифа. Если в названии есть пробелы, берите его в кавычки.
-- PRICE - цена целым числом больше 0.
-- DURATION_DAYS - длительность доступа в днях, целое число больше 0.
-- CURRENCY - валюта, по умолчанию RUB.
-- sort_order - порядок в списке, по умолчанию 100.
-- description - описание, необязательно.
-
-Примеры:
-/tariff_set week "7 дней" 500 7
-/tariff_set month "30 дней" 1500 30 RUB 20
-"""
+TARIFF_SET_USAGE = text("admin.tariff_set_usage")
 
 
 @dataclass(frozen=True)
@@ -65,9 +51,9 @@ class TariffSetValidationError(ValueError):
     pass
 
 
-def parse_tariff_set_args(text: str | None) -> TariffSetArgs:
+def parse_tariff_set_args(command_text: str | None) -> TariffSetArgs:
     try:
-        args = shlex.split((text or "").partition(" ")[2])
+        args = shlex.split((command_text or "").partition(" ")[2])
     except ValueError as exc:
         raise TariffSetUsageError from exc
 
@@ -79,14 +65,14 @@ def parse_tariff_set_args(text: str | None) -> TariffSetArgs:
     except ValueError as exc:
         raise TariffSetUsageError from exc
     if price_amount <= 0:
-        raise TariffSetValidationError("Цена тарифа должна быть больше 0.")
+        raise TariffSetValidationError(text("admin.tariff_price_invalid"))
 
     try:
         duration_days = int(args[3])
     except ValueError as exc:
         raise TariffSetUsageError from exc
     if duration_days <= 0:
-        raise TariffSetValidationError("Длительность тарифа должна быть больше 0 дней.")
+        raise TariffSetValidationError(text("admin.tariff_duration_invalid"))
 
     try:
         sort_order = int(args[5]) if len(args) >= 6 else 100
@@ -122,12 +108,20 @@ async def _answer_admin_tariffs(message: Message, settings: Settings) -> None:
     async with open_database(settings.database_path) as db:
         tariffs = await TariffsRepository(db).list_all()
     if not tariffs:
-        await message.answer("Тарифов нет.")
+        await message.answer(text("admin.tariffs_empty"))
         return
     await message.answer(
         "\n\n".join(
-            f"{item.code}: {item.title}, {item.price_amount} {item.currency}, "
-            f"{item.duration_days} дн., active={item.is_active}, sort={item.sort_order}"
+            text(
+                "admin.tariffs_list_item",
+                code=item.code,
+                title=item.title,
+                price_amount=item.price_amount,
+                currency=item.currency,
+                duration_days=item.duration_days,
+                is_active=item.is_active,
+                sort_order=item.sort_order,
+            )
             for item in tariffs
         )
     )
@@ -137,9 +131,9 @@ async def _answer_disable_tariff_list(message: Message, settings: Settings) -> N
     async with open_database(settings.database_path) as db:
         tariffs = await TariffsRepository(db).list_active()
     if not tariffs:
-        await message.answer("Активных тарифов нет.")
+        await message.answer(text("admin.active_tariffs_empty"))
         return
-    await message.answer("Выберите тариф для отключения:", reply_markup=admin_disable_tariffs_keyboard(tariffs))
+    await message.answer(text("admin.disable_tariff_prompt"), reply_markup=admin_disable_tariffs_keyboard(tariffs))
 
 
 @router.message(F.text.func(lambda text: is_reply_button_text(text, ADMIN_TARIFFS_BUTTON)))
@@ -174,7 +168,7 @@ async def tariff_set(message: Message, settings: Settings) -> None:
             sort_order=args.sort_order,
         )
         await db.commit()
-    await message.answer(f"Тариф сохранен: {tariff.code}")
+    await message.answer(text("admin.tariff_saved", code=tariff.code))
 
 
 @router.message(F.text.func(lambda text: is_reply_button_text(text, ADMIN_DISABLE_TARIFF_BUTTON)))
@@ -190,7 +184,7 @@ async def tariff_disable_select(callback: CallbackQuery, settings: Settings) -> 
         return
     code = callback.data.removeprefix(ADMIN_DISABLE_TARIFF_SELECT_PREFIX)
     await callback.message.edit_text(
-        f"Отключить тариф {code}?",
+        text("admin.tariff_disable_confirm", code=code),
         reply_markup=admin_disable_tariff_confirm_keyboard(code),
     )
     await callback.answer()
@@ -204,8 +198,8 @@ async def tariff_disable_confirm(callback: CallbackQuery, settings: Settings) ->
     async with open_database(settings.database_path) as db:
         changed = await TariffsRepository(db).set_active(code, False)
         await db.commit()
-    text = "Тариф отключен." if changed else "Тариф не найден."
-    await callback.message.edit_text(text)
+    result_text = text("admin.tariff_disabled") if changed else text("admin.tariff_not_found")
+    await callback.message.edit_text(result_text)
     await callback.answer()
 
 
@@ -213,7 +207,7 @@ async def tariff_disable_confirm(callback: CallbackQuery, settings: Settings) ->
 async def tariff_disable_cancel(callback: CallbackQuery, settings: Settings) -> None:
     if not _is_admin_user(callback.from_user, settings) or not _is_private_callback(callback):
         return
-    await callback.message.edit_text("Отключение тарифа отменено.")
+    await callback.message.edit_text(text("admin.tariff_disable_cancelled"))
     await callback.answer()
 
 
@@ -243,7 +237,7 @@ async def grant_access(message: Message, settings: Settings) -> None:
         if telegram_user_id <= 0 or duration_days <= 0:
             raise ValueError
     except ValueError:
-        await message.answer("Формат: /grant_access <telegram_id> <days> или /grant_access <days>")
+        await message.answer(text("admin.grant_access_usage"))
         return
 
     async with open_database(settings.database_path) as db:
@@ -259,6 +253,9 @@ async def grant_access(message: Message, settings: Settings) -> None:
         await db.commit()
 
     await message.answer(
-        f"Доступ выдан пользователю {grant.user.telegram_user_id} до "
-        f"{format_datetime_moscow(grant.user.access_until)}."
+        text(
+            "admin.access_granted",
+            telegram_user_id=grant.user.telegram_user_id,
+            access_until=format_datetime_moscow(grant.user.access_until),
+        )
     )

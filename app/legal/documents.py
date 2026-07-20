@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.messages import message
+
 
 DOCS_ROOT = Path(__file__).resolve().parent / "docs"
 
@@ -20,10 +22,10 @@ class LegalDocumentPage:
 
 
 LEGAL_DOCUMENTS: tuple[LegalDocumentMeta, ...] = (
-    LegalDocumentMeta(key="offer", title="Оферта"),
-    LegalDocumentMeta(key="privacy", title="Политика конфиденциальности"),
-    LegalDocumentMeta(key="refunds", title="Условия возврата"),
-    LegalDocumentMeta(key="community_rules", title="Правила сообщества"),
+    LegalDocumentMeta(key="offer", title=message("legal.offer_title")),
+    LegalDocumentMeta(key="privacy", title=message("legal.privacy_title")),
+    LegalDocumentMeta(key="refunds", title=message("legal.refunds_title")),
+    LegalDocumentMeta(key="community_rules", title=message("legal.community_rules_title")),
 )
 
 LEGAL_DOCUMENTS_BY_KEY = {document.key: document for document in LEGAL_DOCUMENTS}
@@ -48,7 +50,7 @@ def load_legal_document_page(
             meta=meta,
             page_number=1,
             total_pages=1,
-            text="Документ скоро будет опубликован.",
+            text=message("legal.document_coming_soon"),
         )
 
     requested_page = min(max(page_number, 1), len(page_files))
@@ -62,4 +64,10 @@ def load_legal_document_page(
 
 
 def render_legal_document_page(page: LegalDocumentPage) -> str:
-    return f"📄 {page.meta.title}\nСтраница {page.page_number} из {page.total_pages}\n\n{page.text}"
+    return message(
+        "legal.page",
+        title=page.meta.title,
+        page_number=page.page_number,
+        total_pages=page.total_pages,
+        text=page.text,
+    )

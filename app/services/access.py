@@ -4,6 +4,7 @@ from datetime import datetime
 import aiosqlite
 
 from app.db.repositories import AccessEventsRepository, UserRecord, UsersRepository
+from app.messages import message
 from app.utils.datetime import add_days_from_base, datetime_to_iso, utc_now
 
 
@@ -72,5 +73,5 @@ async def grant_manual_access(
     )
     updated_user = await users.get_by_id(user.id)
     if updated_user is None:
-        raise RuntimeError("failed to reload user after manual access grant")
+        raise RuntimeError(message("payment.manual_access_reload_failed"))
     return ManualAccessGrant(user=updated_user, access_extension=extension)

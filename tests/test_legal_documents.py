@@ -24,7 +24,7 @@ def test_load_legal_document_page_reads_numbered_markdown_in_order(tmp_path) -> 
     assert page.page_number == 1
     assert page.total_pages == 2
     assert page.text == "First page"
-    assert render_legal_document_page(page) == "📄 Оферта\nСтраница 1 из 2\n\nFirst page"
+    assert render_legal_document_page(page) == "📄 Оферта\n📃 Страница 1 из 2\n\nFirst page"
 
 
 def test_load_legal_document_page_clamps_to_existing_page(tmp_path) -> None:
@@ -47,7 +47,7 @@ def test_load_legal_document_page_returns_placeholder_for_missing_files(tmp_path
     assert page is not None
     assert page.page_number == 1
     assert page.total_pages == 1
-    assert page.text == "Документ скоро будет опубликован."
+    assert page.text == "📄 Документ скоро будет опубликован."
 
 
 def test_load_legal_document_page_rejects_unknown_document(tmp_path) -> None:
