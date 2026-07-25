@@ -5,6 +5,7 @@ from app.bot.keyboards import (
     ADMIN_DISABLE_TARIFF_BUTTON,
     ADMIN_TARIFFS_BUTTON,
     USER_ACCESS_BUTTON,
+    USER_BENEFITS_BUTTON,
     USER_DOCUMENTS_BUTTON,
     USER_SUPPORT_BUTTON,
     USER_TARIFFS_BUTTON,
@@ -51,7 +52,8 @@ def test_main_menu_keyboard_adds_admin_rows_only_for_admins() -> None:
 
     assert user_rows == [
         [USER_TARIFFS_BUTTON, USER_ACCESS_BUTTON],
-        [USER_DOCUMENTS_BUTTON, USER_SUPPORT_BUTTON],
+        [USER_BENEFITS_BUTTON, USER_DOCUMENTS_BUTTON],
+        [USER_SUPPORT_BUTTON],
     ]
     assert [ADMIN_TARIFFS_BUTTON, ADMIN_DISABLE_TARIFF_BUTTON] not in user_rows
     assert admin_rows == user_rows + [

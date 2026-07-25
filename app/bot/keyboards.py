@@ -9,6 +9,7 @@ USER_TARIFFS_BUTTON = message("button.user_tariffs")
 USER_ACCESS_BUTTON = message("button.user_access")
 USER_DOCUMENTS_BUTTON = message("button.user_documents")
 USER_SUPPORT_BUTTON = message("button.user_support")
+USER_BENEFITS_BUTTON = message("button.user_benefits")
 
 ADMIN_TARIFFS_BUTTON = message("button.admin_tariffs")
 ADMIN_DISABLE_TARIFF_BUTTON = message("button.admin_disable_tariff")
@@ -35,9 +36,10 @@ def main_menu_keyboard(*, is_admin: bool = False) -> ReplyKeyboardMarkup:
             KeyboardButton(text=USER_ACCESS_BUTTON),
         ],
         [
+            KeyboardButton(text=USER_BENEFITS_BUTTON),
             KeyboardButton(text=USER_DOCUMENTS_BUTTON),
-            KeyboardButton(text=USER_SUPPORT_BUTTON),
-        ]
+        ],
+        [KeyboardButton(text=USER_SUPPORT_BUTTON)],
     ]
     if is_admin:
         keyboard.extend(

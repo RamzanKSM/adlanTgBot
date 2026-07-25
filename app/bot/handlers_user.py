@@ -1,4 +1,5 @@
 from aiogram import F, Router
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
@@ -6,6 +7,7 @@ from aiogram.types import CallbackQuery, Message
 from app.bot.filters import PRIVATE_CHAT_FILTER
 from app.bot.keyboards import (
     USER_ACCESS_BUTTON,
+    USER_BENEFITS_BUTTON,
     USER_DOCUMENTS_BUTTON,
     USER_SUPPORT_BUTTON,
     USER_TARIFFS_BUTTON,
@@ -31,6 +33,7 @@ router = Router(name="user")
 router.message.filter(PRIVATE_CHAT_FILTER)
 
 SUPPORT_TEXT = text("user.support")
+COMMUNITY_BENEFITS_TEXT = text("user.community_benefits")
 DOCUMENTS_PROMPT = text("user.documents_prompt")
 NO_ACTIVE_ACCESS_TEXT = text("user.no_active_access")
 
@@ -251,6 +254,11 @@ async def payment_legal_document_page(callback: CallbackQuery) -> None:
 @router.message(F.text.func(lambda text: is_reply_button_text(text, USER_SUPPORT_BUTTON)))
 async def support_button(message: Message) -> None:
     await message.answer(SUPPORT_TEXT)
+
+
+@router.message(F.text.func(lambda text: is_reply_button_text(text, USER_BENEFITS_BUTTON)))
+async def community_benefits_button(message: Message) -> None:
+    await message.answer(COMMUNITY_BENEFITS_TEXT, parse_mode=ParseMode.MARKDOWN)
 
 
 @router.message(F.text.func(lambda text: is_reply_button_text(text, USER_ACCESS_BUTTON)))
