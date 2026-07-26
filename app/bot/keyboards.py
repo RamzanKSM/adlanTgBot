@@ -100,6 +100,14 @@ def payment_agreement_keyboard(
     )
 
 
+def payment_url_keyboard(payment_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=message("button.payment_pay"), url=payment_url)],
+        ]
+    )
+
+
 def document_page_keyboard(
     document_key: str,
     page_number: int,

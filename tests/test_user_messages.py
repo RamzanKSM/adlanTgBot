@@ -8,6 +8,7 @@ from app.bot.handlers_user import (
     community_benefits_button,
 )
 from app.bot.keyboards import USER_BENEFITS_BUTTON
+from app.messages import message
 
 
 def test_user_messages_use_the_requested_concise_copy() -> None:
@@ -38,3 +39,12 @@ async def test_community_benefits_button_sends_markdown_message() -> None:
     await community_benefits_button(fake_message)  # type: ignore[arg-type]
 
     assert fake_message.calls == [(COMMUNITY_BENEFITS_TEXT, {"parse_mode": ParseMode.MARKDOWN})]
+
+
+def test_payment_created_messages_do_not_include_payment_url() -> None:
+    payment_url = "https://pay.example/invoice/1"
+
+    for key in ("user.payment_link_created", "user.mock_payment_created"):
+        body = message(key)
+        assert payment_url not in body
+        assert "💳 Оплатить" in body

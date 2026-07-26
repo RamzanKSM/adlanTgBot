@@ -15,6 +15,7 @@ from app.bot.keyboards import (
     documents_keyboard,
     main_menu_keyboard,
     payment_agreement_keyboard,
+    payment_url_keyboard,
     reply_text_key,
     tariffs_keyboard,
 )
@@ -92,6 +93,17 @@ def test_payment_agreement_keyboard_carries_tariff_code() -> None:
         "pdoc:week:community_rules:1",
     ]
     assert callbacks[-1] == "pay:week"
+
+
+def test_payment_url_keyboard_uses_payment_button_and_url() -> None:
+    payment_url = "https://pay.example/invoice/1"
+
+    keyboard = payment_url_keyboard(payment_url)
+
+    button = keyboard.inline_keyboard[0][0]
+    assert button.text == "💳 Оплатить"
+    assert button.url == payment_url
+    assert button.callback_data is None
 
 
 def test_document_page_keyboard_supports_pagination_and_payment_return() -> None:

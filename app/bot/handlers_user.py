@@ -16,6 +16,7 @@ from app.bot.keyboards import (
     is_reply_button_text,
     main_menu_keyboard,
     payment_agreement_keyboard,
+    payment_url_keyboard,
     tariffs_keyboard,
 )
 from app.config import Settings
@@ -178,11 +179,13 @@ async def pay_tariff(callback: CallbackQuery, settings: Settings, lava_client: L
             return
     if created.payment.provider == "mock":
         await callback.message.answer(
-            text("user.mock_payment_created", payment_url=created.payment_url)
+            text("user.mock_payment_created"),
+            reply_markup=payment_url_keyboard(created.payment_url),
         )
     else:
         await callback.message.answer(
-            text("user.payment_link_created", payment_url=created.payment_url)
+            text("user.payment_link_created"),
+            reply_markup=payment_url_keyboard(created.payment_url),
         )
     await callback.answer()
 
