@@ -11,6 +11,7 @@ from app.bot.keyboards import (
     USER_DOCUMENTS_BUTTON,
     USER_SUPPORT_BUTTON,
     USER_TARIFFS_BUTTON,
+    USER_TRIAL_BUTTON,
     document_page_keyboard,
     documents_keyboard,
     is_reply_button_text,
@@ -27,6 +28,7 @@ from app.messages import message as text
 from app.services.invites import InviteService
 from app.services.lava import LavaClient
 from app.services.payments import PaymentService
+from app.services.trials import TrialService
 from app.utils.datetime import format_datetime_moscow, utc_now
 
 
@@ -84,9 +86,15 @@ async def _answer_documents(message: Message) -> None:
 
 
 async def _answer_menu(message: Message, settings: Settings) -> None:
+    trial_available = False
+    if message.from_user is not None:
+        async with open_database(settings.database_path) as db:
+            user = await UsersRepository(db).get_by_telegram_id(message.from_user.id)
+            if user is not None:
+                trial_available = await TrialService(db).is_eligible(user)
     await message.answer(
         text("user.choose_action"),
-        reply_markup=main_menu_keyboard(is_admin=_is_admin(message, settings)),
+        reply_markup=main_menu_keyboard(is_admin=_is_admin(message, settings), trial_available=trial_available),
     )
 
 
@@ -127,22 +135,63 @@ async def start(message: Message, settings: Settings) -> None:
         return
     async with open_database(settings.database_path) as db:
         users = UsersRepository(db)
-        await users.upsert_telegram_user(
+        user = await users.upsert_telegram_user(
             telegram_user_id=message.from_user.id,
             username=message.from_user.username,
             first_name=message.from_user.first_name,
             last_name=message.from_user.last_name,
         )
+        trial_available = await TrialService(db).is_eligible(user)
         await db.commit()
     await message.answer(
         text("user.welcome"),
-        reply_markup=main_menu_keyboard(is_admin=_is_admin(message, settings)),
+        reply_markup=main_menu_keyboard(is_admin=_is_admin(message, settings), trial_available=trial_available),
     )
 
 
 @router.message(F.text.func(lambda text: is_reply_button_text(text, USER_TARIFFS_BUTTON)))
 async def tariffs_button(message: Message, settings: Settings) -> None:
     await _answer_tariffs(message, settings)
+
+
+@router.message(F.text.func(lambda text: is_reply_button_text(text, USER_TRIAL_BUTTON)))
+async def trial_button(message: Message, settings: Settings) -> None:
+    if message.from_user is None:
+        return
+    async with open_database(settings.database_path) as db:
+        trial_service = TrialService(db)
+        result = await trial_service.grant(
+            telegram_user_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+        )
+        if result.status == "disabled":
+            await message.answer(text("user.trial_disabled"))
+            return
+        if result.status == "already_used":
+            await message.answer(text("user.trial_already_used"))
+            return
+        if result.status == "active_access":
+            await message.answer(
+                text("user.trial_active_access", access_until=format_datetime_moscow(result.expires_at))
+            )
+            return
+
+        invite_service = InviteService(db, settings, message.bot)
+        try:
+            link = await invite_service.ensure_personal_invite(message.from_user.id)
+        except TelegramBadRequest:
+            await message.answer(
+                text("user.trial_activated_invite_error", access_until=format_datetime_moscow(result.expires_at))
+            )
+            return
+        if link:
+            await message.answer(
+                text("user.trial_activated_with_link", access_until=format_datetime_moscow(result.expires_at), link=link)
+            )
+        else:
+            await message.answer(text("user.trial_activated_already_member", access_until=format_datetime_moscow(result.expires_at)))
 
 
 @router.callback_query(F.data.startswith("buy:"))

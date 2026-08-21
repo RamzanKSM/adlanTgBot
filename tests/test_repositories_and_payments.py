@@ -120,6 +120,7 @@ async def test_migrations_preserve_populated_legacy_database_and_are_repeatable(
             username TEXT,
             first_name TEXT,
             last_name TEXT,
+            access_until TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -143,8 +144,8 @@ async def test_migrations_preserve_populated_legacy_database_and_are_repeatable(
             currency TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
-        INSERT INTO users (telegram_user_id, username, created_at, updated_at)
-        VALUES (1001, 'legacy_user', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        INSERT INTO users (telegram_user_id, username, access_until, created_at, updated_at)
+        VALUES (1001, 'legacy_user', '2099-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
         INSERT INTO tariffs (code, title, price_amount, duration_days, created_at, updated_at)
         VALUES ('legacy', 'Legacy tariff', 1500, 30, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
         INSERT INTO payments (
@@ -171,6 +172,8 @@ async def test_migrations_preserve_populated_legacy_database_and_are_repeatable(
 
     assert user["telegram_user_id"] == 1001
     assert user["is_in_group"] == 0
+    assert user["access_kind"] == "manual"
+    assert user["access_source_id"] is None
     assert tariff["code"] == "legacy"
     assert tariff["currency"] == "RUB"
     assert payment["order_id"] == "order-legacy-1"
@@ -178,7 +181,7 @@ async def test_migrations_preserve_populated_legacy_database_and_are_repeatable(
     assert user["created_at"] == "2026-01-01T03:00:00+03:00"
     assert tariff["updated_at"] == "2026-01-01T03:00:00+03:00"
     assert payment["created_at"] == "2026-01-01T03:00:00+03:00"
-    assert [row["version"] for row in versions] == [1, 2, 3, 4]
+    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5]
 
 
 async def test_timestamp_migration_converts_populated_v3_database_once(tmp_path) -> None:
@@ -246,7 +249,7 @@ async def test_timestamp_migration_converts_populated_v3_database_once(tmp_path)
     finally:
         await connection.close()
 
-    assert [row["version"] for row in versions] == [1, 2, 3, 4]
+    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5]
 
 
 async def test_migrations_serialize_concurrent_startup(tmp_path) -> None:
@@ -261,7 +264,7 @@ async def test_migrations_serialize_concurrent_startup(tmp_path) -> None:
     finally:
         await connection.close()
 
-    assert [row["version"] for row in versions] == [1, 2, 3, 4]
+    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5]
     assert {row["name"] for row in tables} >= {
         "users",
         "tariffs",
@@ -269,6 +272,8 @@ async def test_migrations_serialize_concurrent_startup(tmp_path) -> None:
         "invite_links",
         "access_events",
         "schema_migrations",
+        "trial_settings",
+        "trial_accesses",
     }
 
 

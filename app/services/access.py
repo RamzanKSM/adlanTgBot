@@ -3,7 +3,7 @@ from datetime import datetime
 
 import aiosqlite
 
-from app.db.repositories import AccessEventsRepository, UserRecord, UsersRepository
+from app.db.repositories import AccessEventsRepository, TrialAccessesRepository, UserRecord, UsersRepository
 from app.messages import message
 from app.utils.datetime import add_days_from_base, datetime_to_iso, utc_now
 
@@ -59,7 +59,9 @@ async def grant_manual_access(
         )
 
     extension = calculate_access_extension(user.access_until, duration_days, granted_at)
-    await users.set_access_until(user.id, extension.new_access_until)
+    await users.set_access(user.id, extension.new_access_until, "manual", None)
+    if user.access_kind == "trial":
+        await TrialAccessesRepository(db).set_status(user.id, "superseded")
     await AccessEventsRepository(db).add(
         telegram_user_id=user.telegram_user_id,
         user_id=user.id,

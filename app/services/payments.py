@@ -11,6 +11,7 @@ from app.db.repositories import (
     PaymentsRepository,
     PaymentRecord,
     TariffsRepository,
+    TrialAccessesRepository,
     UsersRepository,
 )
 from app.messages import message
@@ -159,7 +160,9 @@ class PaymentService:
 
             extension = calculate_access_extension(user.access_until, tariff.duration_days, paid_at)
             applied_at = utc_now()
-            await self.users.set_access_until(user.id, extension.new_access_until)
+            await self.users.set_access(user.id, extension.new_access_until, "paid", payment.id)
+            if user.access_kind == "trial":
+                await TrialAccessesRepository(self.db).set_status(user.id, "converted")
             await self.payments.mark_applied(payment.id, applied_at)
             await self.events.add(
                 telegram_user_id=user.telegram_user_id,
@@ -170,6 +173,7 @@ class PaymentService:
                     "tariff_id": tariff.id,
                     "previous_access_until": datetime_to_iso(extension.previous_access_until),
                     "new_access_until": datetime_to_iso(extension.new_access_until),
+                    "access_kind": "paid",
                 },
             )
             await self.db.commit()
