@@ -20,7 +20,13 @@ def test_user_and_admin_command_lists() -> None:
 
     assert user_names == ["start"]
     assert admin_names[: len(user_names)] == user_names
-    assert admin_names[len(user_names) :] == ["tariff_set", "grant_access"]
+    assert admin_names[len(user_names) :] == [
+        "tariff_set",
+        "grant_access",
+        "trial_set",
+        "trial_disable",
+        "trial_status",
+    ]
 
 
 def test_tariff_set_command_description_shows_short_format() -> None:

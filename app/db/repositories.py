@@ -16,6 +16,8 @@ class UserRecord:
     first_name: str | None
     last_name: str | None
     access_until: datetime | None
+    access_kind: str | None
+    access_source_id: int | None
     is_in_group: bool
     warned_access_until: str | None
 
@@ -66,6 +68,26 @@ class InviteLinkRecord:
     revoked_at: datetime | None
 
 
+@dataclass(slots=True)
+class TrialSettingsRecord:
+    enabled: bool
+    duration_days: int
+    updated_at: datetime
+    updated_by_telegram_user_id: int | None
+
+
+@dataclass(slots=True)
+class TrialAccessRecord:
+    id: int
+    user_id: int
+    telegram_user_id: int
+    started_at: datetime
+    expires_at: datetime
+    status: str
+    issued_by: str
+    warned_at: datetime | None
+
+
 async def _fetchone(
     db: aiosqlite.Connection,
     sql: str,
@@ -85,6 +107,8 @@ def _user(row: aiosqlite.Row | None) -> UserRecord | None:
         first_name=row["first_name"],
         last_name=row["last_name"],
         access_until=iso_to_datetime(row["access_until"]),
+        access_kind=row["access_kind"],
+        access_source_id=row["access_source_id"],
         is_in_group=bool(row["is_in_group"]),
         warned_access_until=row["warned_access_until"],
     )
@@ -145,6 +169,32 @@ def _invite(row: aiosqlite.Row | None) -> InviteLinkRecord | None:
     )
 
 
+def _trial_settings(row: aiosqlite.Row | None) -> TrialSettingsRecord | None:
+    if row is None:
+        return None
+    return TrialSettingsRecord(
+        enabled=bool(row["enabled"]),
+        duration_days=row["duration_days"],
+        updated_at=iso_to_datetime(row["updated_at"]) or utc_now(),
+        updated_by_telegram_user_id=row["updated_by_telegram_user_id"],
+    )
+
+
+def _trial_access(row: aiosqlite.Row | None) -> TrialAccessRecord | None:
+    if row is None:
+        return None
+    return TrialAccessRecord(
+        id=row["id"],
+        user_id=row["user_id"],
+        telegram_user_id=row["telegram_user_id"],
+        started_at=iso_to_datetime(row["started_at"]) or utc_now(),
+        expires_at=iso_to_datetime(row["expires_at"]) or utc_now(),
+        status=row["status"],
+        issued_by=row["issued_by"],
+        warned_at=iso_to_datetime(row["warned_at"]),
+    )
+
+
 class UsersRepository:
     def __init__(self, db: aiosqlite.Connection):
         self.db = db
@@ -197,6 +247,22 @@ class UsersRepository:
             (datetime_to_iso(access_until), datetime_to_iso(utc_now()), user_id),
         )
 
+    async def set_access(
+        self,
+        user_id: int,
+        access_until: datetime,
+        access_kind: str,
+        access_source_id: int | None,
+    ) -> None:
+        await self.db.execute(
+            """
+            UPDATE users
+            SET access_until = ?, access_kind = ?, access_source_id = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (datetime_to_iso(access_until), access_kind, access_source_id, datetime_to_iso(utc_now()), user_id),
+        )
+
     async def set_is_in_group(self, telegram_user_id: int, is_in_group: bool) -> None:
         await self.db.execute(
             "UPDATE users SET is_in_group = ?, updated_at = ? WHERE telegram_user_id = ?",
@@ -219,16 +285,24 @@ class UsersRepository:
         )
         return [user for row in rows if (user := _user(row))]
 
-    async def list_warning_due(self, now: datetime, warning_until: datetime) -> list[UserRecord]:
+    async def list_warning_due(
+        self,
+        now: datetime,
+        trial_warning_until: datetime,
+        standard_warning_until: datetime,
+    ) -> list[UserRecord]:
         rows = await self.db.execute_fetchall(
             """
             SELECT * FROM users
             WHERE access_until IS NOT NULL
               AND access_until > ?
-              AND access_until <= ?
               AND (warned_access_until IS NULL OR warned_access_until != access_until)
+              AND (
+                  (access_kind = 'trial' AND access_until <= ?)
+                  OR (COALESCE(access_kind, 'manual') != 'trial' AND access_until <= ?)
+              )
             """,
-            (datetime_to_iso(now), datetime_to_iso(warning_until)),
+            (datetime_to_iso(now), datetime_to_iso(trial_warning_until), datetime_to_iso(standard_warning_until)),
         )
         return [user for row in rows if (user := _user(row))]
 
@@ -488,6 +562,90 @@ class InviteLinksRepository:
         await self.db.execute(
             "UPDATE invite_links SET status = 'revoked', revoked_at = ? WHERE id = ?",
             (datetime_to_iso(revoked_at), invite_id),
+        )
+
+
+class TrialSettingsRepository:
+    def __init__(self, db: aiosqlite.Connection):
+        self.db = db
+
+    async def get(self) -> TrialSettingsRecord:
+        row = await _fetchone(self.db, "SELECT * FROM trial_settings WHERE id = 1")
+        settings = _trial_settings(row)
+        if settings is None:
+            raise RuntimeError("trial settings are not initialized")
+        return settings
+
+    async def set(self, enabled: bool, duration_days: int, updated_by_telegram_user_id: int) -> TrialSettingsRecord:
+        now = datetime_to_iso(utc_now())
+        await self.db.execute(
+            """
+            UPDATE trial_settings
+            SET enabled = ?, duration_days = ?, updated_at = ?, updated_by_telegram_user_id = ?
+            WHERE id = 1
+            """,
+            (1 if enabled else 0, duration_days, now, updated_by_telegram_user_id),
+        )
+        return await self.get()
+
+
+class TrialAccessesRepository:
+    def __init__(self, db: aiosqlite.Connection):
+        self.db = db
+
+    async def get_by_user_id(self, user_id: int) -> TrialAccessRecord | None:
+        return _trial_access(await _fetchone(self.db, "SELECT * FROM trial_accesses WHERE user_id = ?", (user_id,)))
+
+    async def create(
+        self,
+        user_id: int,
+        telegram_user_id: int,
+        started_at: datetime,
+        expires_at: datetime,
+        issued_by: str = "bot",
+    ) -> TrialAccessRecord:
+        now = datetime_to_iso(utc_now())
+        cursor = await self.db.execute(
+            """
+            INSERT INTO trial_accesses (
+                user_id, telegram_user_id, started_at, expires_at, status, issued_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+            """,
+            (
+                user_id,
+                telegram_user_id,
+                datetime_to_iso(started_at),
+                datetime_to_iso(expires_at),
+                issued_by,
+                now,
+                now,
+            ),
+        )
+        record = await self.get_by_user_id(user_id)
+        if record is None or cursor.lastrowid != record.id:
+            raise RuntimeError("failed to create trial access")
+        return record
+
+    async def set_status(self, user_id: int, status: str) -> None:
+        await self.db.execute(
+            "UPDATE trial_accesses SET status = ?, updated_at = ? WHERE user_id = ? AND status = 'active'",
+            (status, datetime_to_iso(utc_now()), user_id),
+        )
+
+    async def mark_warned(self, user_id: int, warned_at: datetime) -> None:
+        await self.db.execute(
+            "UPDATE trial_accesses SET warned_at = ?, updated_at = ? WHERE user_id = ?",
+            (datetime_to_iso(warned_at), datetime_to_iso(utc_now()), user_id),
+        )
+
+    async def mark_expired_due(self, now: datetime) -> None:
+        await self.db.execute(
+            """
+            UPDATE trial_accesses
+            SET status = 'expired', updated_at = ?
+            WHERE status = 'active' AND expires_at <= ?
+            """,
+            (datetime_to_iso(now), datetime_to_iso(now)),
         )
 
 

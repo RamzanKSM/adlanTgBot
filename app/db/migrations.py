@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS users (
     first_name TEXT,
     last_name TEXT,
     access_until TEXT,
+    access_kind TEXT,
+    access_source_id INTEGER,
     is_in_group INTEGER NOT NULL DEFAULT 0,
     warned_access_until TEXT,
     created_at TEXT NOT NULL,
@@ -80,6 +82,29 @@ CREATE TABLE IF NOT EXISTS access_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_access_events_user_created_at ON access_events(telegram_user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS trial_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled INTEGER NOT NULL DEFAULT 0,
+    duration_days INTEGER NOT NULL DEFAULT 3,
+    updated_at TEXT NOT NULL,
+    updated_by_telegram_user_id INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS trial_accesses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    telegram_user_id INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    issued_by TEXT NOT NULL,
+    warned_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_trial_accesses_status_expires_at ON trial_accesses(status, expires_at);
 """
 
 
@@ -241,6 +266,67 @@ async def _migrate_timestamps_to_moscow(db) -> None:
                     )
 
 
+async def _migrate_trial_mode(db) -> None:
+    """Add trial state without altering historic users or payments."""
+    await _ensure_columns(
+        db,
+        "users",
+        {
+            "access_kind": "TEXT",
+            "access_source_id": "INTEGER",
+        },
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trial_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL DEFAULT 0,
+            duration_days INTEGER NOT NULL DEFAULT 3,
+            updated_at TEXT NOT NULL,
+            updated_by_telegram_user_id INTEGER
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trial_accesses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+            telegram_user_id INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            status TEXT NOT NULL,
+            issued_by TEXT NOT NULL,
+            warned_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trial_accesses_status_expires_at ON trial_accesses(status, expires_at)"
+    )
+    now = datetime_to_iso(utc_now())
+    await db.execute(
+        """
+        INSERT INTO trial_settings (id, enabled, duration_days, updated_at)
+        VALUES (1, 0, 3, ?)
+        ON CONFLICT(id) DO NOTHING
+        """,
+        (now,),
+    )
+    # Historic paid/manual records predate access provenance. Preserve active
+    # access as neutral manual access rather than inventing payment sources.
+    current_time = utc_now()
+    rows = await db.execute_fetchall(
+        "SELECT id, access_until FROM users WHERE access_until IS NOT NULL AND access_kind IS NULL"
+    )
+    for row in rows:
+        access_until = iso_to_datetime(row["access_until"])
+        if access_until is not None and access_until > current_time:
+            await db.execute("UPDATE users SET access_kind = 'manual' WHERE id = ?", (row["id"],))
+
+
 async def _applied_versions(db) -> set[int]:
     rows = await db.execute_fetchall("SELECT version FROM schema_migrations")
     return {row["version"] for row in rows}
@@ -275,6 +361,13 @@ async def _apply_migrations(db) -> None:
         await _migrate_timestamps_to_moscow(db)
         await db.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (4, ?)",
+            (datetime_to_iso(utc_now()),),
+        )
+
+    if 5 not in applied_versions:
+        await _migrate_trial_mode(db)
+        await db.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (5, ?)",
             (datetime_to_iso(utc_now()),),
         )
 

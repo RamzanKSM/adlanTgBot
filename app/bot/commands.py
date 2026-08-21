@@ -25,6 +25,9 @@ ADMIN_COMMANDS = [
     *USER_COMMANDS,
     BotCommand(command="tariff_set", description=message("command.tariff_set")),
     BotCommand(command="grant_access", description=message("command.grant_access")),
+    BotCommand(command="trial_set", description=message("command.trial_set")),
+    BotCommand(command="trial_disable", description=message("command.trial_disable")),
+    BotCommand(command="trial_status", description=message("command.trial_status")),
 ]
 
 

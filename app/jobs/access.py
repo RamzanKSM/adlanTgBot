@@ -6,7 +6,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from app.config import Settings
 from app.db.connection import open_database
-from app.db.repositories import AccessEventsRepository, UsersRepository
+from app.db.repositories import AccessEventsRepository, TrialAccessesRepository, UsersRepository
 from app.messages import message
 from app.services.group_access import can_remove_from_group
 from app.utils.datetime import datetime_to_iso, format_datetime_moscow, utc_now
@@ -17,18 +17,24 @@ logger = logging.getLogger(__name__)
 
 async def warn_and_expire_access(settings: Settings, bot: Bot) -> None:
     now = utc_now()
-    warning_until = now + timedelta(days=3)
+    trial_warning_until = now + timedelta(days=1)
+    standard_warning_until = now + timedelta(days=3)
     async with open_database(settings.database_path) as db:
         users = UsersRepository(db)
         events = AccessEventsRepository(db)
 
-        for user in await users.list_warning_due(now, warning_until):
+        trials = TrialAccessesRepository(db)
+        await trials.mark_expired_due(now)
+        for user in await users.list_warning_due(now, trial_warning_until, standard_warning_until):
             if user.access_until is None:
                 continue
             try:
                 await bot.send_message(
                     user.telegram_user_id,
-                    message("access.warning", access_until=format_datetime_moscow(user.access_until)),
+                    message(
+                        _warning_message_key(user.access_kind),
+                        access_until=format_datetime_moscow(user.access_until),
+                    ),
                 )
             finally:
                 await users.mark_warned(user.id, user.access_until)
@@ -36,8 +42,10 @@ async def warn_and_expire_access(settings: Settings, bot: Bot) -> None:
                     telegram_user_id=user.telegram_user_id,
                     user_id=user.id,
                     event_type="access_warning_sent",
-                    details={"access_until": datetime_to_iso(user.access_until)},
+                    details={"access_until": datetime_to_iso(user.access_until), "access_kind": user.access_kind or "manual"},
                 )
+                if user.access_kind == "trial":
+                    await trials.mark_warned(user.id, now)
 
         for user in await users.list_expired_in_group(now):
             safety = await can_remove_from_group(bot, settings, user.telegram_user_id)
@@ -94,3 +102,11 @@ async def warn_and_expire_access(settings: Settings, bot: Bot) -> None:
                     )
 
         await db.commit()
+
+
+def _warning_message_key(access_kind: str | None) -> str:
+    if access_kind == "trial":
+        return "access.trial_warning"
+    if access_kind == "paid":
+        return "access.paid_warning"
+    return "access.manual_warning"

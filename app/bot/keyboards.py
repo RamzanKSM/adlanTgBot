@@ -10,6 +10,7 @@ USER_ACCESS_BUTTON = message("button.user_access")
 USER_DOCUMENTS_BUTTON = message("button.user_documents")
 USER_SUPPORT_BUTTON = message("button.user_support")
 USER_BENEFITS_BUTTON = message("button.user_benefits")
+USER_TRIAL_BUTTON = message("button.user_trial")
 
 ADMIN_TARIFFS_BUTTON = message("button.admin_tariffs")
 ADMIN_DISABLE_TARIFF_BUTTON = message("button.admin_disable_tariff")
@@ -29,7 +30,7 @@ def is_reply_button_text(text: str | None, button_text: str) -> bool:
     return reply_text_key(text) == reply_text_key(button_text)
 
 
-def main_menu_keyboard(*, is_admin: bool = False) -> ReplyKeyboardMarkup:
+def main_menu_keyboard(*, is_admin: bool = False, trial_available: bool = False) -> ReplyKeyboardMarkup:
     keyboard = [
         [
             KeyboardButton(text=USER_TARIFFS_BUTTON),
@@ -41,6 +42,8 @@ def main_menu_keyboard(*, is_admin: bool = False) -> ReplyKeyboardMarkup:
         ],
         [KeyboardButton(text=USER_SUPPORT_BUTTON)],
     ]
+    if trial_available:
+        keyboard.insert(1, [KeyboardButton(text=USER_TRIAL_BUTTON)])
     if is_admin:
         keyboard.extend(
             [

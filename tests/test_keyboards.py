@@ -9,6 +9,7 @@ from app.bot.keyboards import (
     USER_DOCUMENTS_BUTTON,
     USER_SUPPORT_BUTTON,
     USER_TARIFFS_BUTTON,
+    USER_TRIAL_BUTTON,
     admin_disable_tariff_confirm_keyboard,
     admin_disable_tariffs_keyboard,
     document_page_keyboard,
@@ -61,6 +62,12 @@ def test_main_menu_keyboard_adds_admin_rows_only_for_admins() -> None:
         [ADMIN_TARIFFS_BUTTON, ADMIN_DISABLE_TARIFF_BUTTON],
     ]
     assert user_keyboard.is_persistent is True
+
+
+def test_main_menu_keyboard_shows_trial_only_when_available() -> None:
+    rows = [[button.text for button in row] for row in main_menu_keyboard(trial_available=True).keyboard]
+
+    assert rows[1] == [USER_TRIAL_BUTTON]
 
 
 def test_reply_text_key_ignores_emoji_and_variation_selectors() -> None:

@@ -19,7 +19,7 @@ from app.bot.keyboards import (
 )
 from app.config import Settings
 from app.db.connection import open_database
-from app.db.repositories import TariffsRepository
+from app.db.repositories import AccessEventsRepository, TariffsRepository, TrialSettingsRepository
 from app.messages import message as text
 from app.services.access import grant_manual_access
 from app.utils.datetime import format_datetime_moscow
@@ -30,6 +30,7 @@ router.message.filter(PRIVATE_CHAT_FILTER)
 
 
 TARIFF_SET_USAGE = text("admin.tariff_set_usage")
+TRIAL_SET_USAGE = text("admin.trial_set_usage")
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,30 @@ class TariffSetUsageError(ValueError):
 
 class TariffSetValidationError(ValueError):
     pass
+
+
+class TrialSetUsageError(ValueError):
+    pass
+
+
+class TrialSetValidationError(ValueError):
+    pass
+
+
+def parse_trial_set_args(command_text: str | None) -> int:
+    try:
+        args = shlex.split((command_text or "").partition(" ")[2])
+    except ValueError as exc:
+        raise TrialSetUsageError from exc
+    if len(args) != 1:
+        raise TrialSetUsageError
+    try:
+        duration_days = int(args[0])
+    except ValueError as exc:
+        raise TrialSetUsageError from exc
+    if not 1 <= duration_days <= 1000:
+        raise TrialSetValidationError(text("admin.trial_duration_invalid"))
+    return duration_days
 
 
 def parse_tariff_set_args(command_text: str | None) -> TariffSetArgs:
@@ -257,5 +282,61 @@ async def grant_access(message: Message, settings: Settings) -> None:
             "admin.access_granted",
             telegram_user_id=grant.user.telegram_user_id,
             access_until=format_datetime_moscow(grant.user.access_until),
+        )
+    )
+
+
+@router.message(Command("trial_set"))
+async def trial_set(message: Message, settings: Settings) -> None:
+    if not _is_admin(message, settings) or message.from_user is None:
+        return
+    try:
+        duration_days = parse_trial_set_args(message.text)
+    except TrialSetUsageError:
+        await message.answer(TRIAL_SET_USAGE)
+        return
+    except TrialSetValidationError as exc:
+        await message.answer(str(exc))
+        return
+
+    async with open_database(settings.database_path) as db:
+        trial_settings = await TrialSettingsRepository(db).set(True, duration_days, message.from_user.id)
+        await AccessEventsRepository(db).add(
+            telegram_user_id=message.from_user.id,
+            event_type="trial_settings_updated",
+            details={"enabled": True, "duration_days": trial_settings.duration_days},
+        )
+        await db.commit()
+    await message.answer(text("admin.trial_enabled", duration_days=duration_days))
+
+
+@router.message(Command("trial_disable"))
+async def trial_disable(message: Message, settings: Settings) -> None:
+    if not _is_admin(message, settings) or message.from_user is None:
+        return
+    async with open_database(settings.database_path) as db:
+        repository = TrialSettingsRepository(db)
+        current = await repository.get()
+        await repository.set(False, current.duration_days, message.from_user.id)
+        await AccessEventsRepository(db).add(
+            telegram_user_id=message.from_user.id,
+            event_type="trial_settings_updated",
+            details={"enabled": False, "duration_days": current.duration_days},
+        )
+        await db.commit()
+    await message.answer(text("admin.trial_disabled"))
+
+
+@router.message(Command("trial_status"))
+async def trial_status(message: Message, settings: Settings) -> None:
+    if not _is_admin(message, settings):
+        return
+    async with open_database(settings.database_path) as db:
+        current = await TrialSettingsRepository(db).get()
+    await message.answer(
+        text(
+            "admin.trial_status",
+            enabled=text("admin.trial_enabled_status") if current.enabled else text("admin.trial_disabled_status"),
+            duration_days=current.duration_days,
         )
     )
