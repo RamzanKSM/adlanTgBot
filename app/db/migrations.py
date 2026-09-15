@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS payments (
     expires_at TEXT,
     raw_payload TEXT NOT NULL DEFAULT '{}',
     applied_at TEXT,
+    admin_notification_attempted_at TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
@@ -68,6 +69,8 @@ CREATE TABLE IF NOT EXISTS invite_links (
     created_at TEXT NOT NULL,
     used_at TEXT,
     revoked_at TEXT
+    ,access_kind TEXT
+    ,access_source_id INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_invite_links_user_status ON invite_links(user_id, status);
@@ -105,6 +108,20 @@ CREATE TABLE IF NOT EXISTS trial_accesses (
 );
 
 CREATE INDEX IF NOT EXISTS idx_trial_accesses_status_expires_at ON trial_accesses(status, expires_at);
+
+CREATE TABLE IF NOT EXISTS promo_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    duration_days INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    created_by_telegram_user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    redeemed_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    redeemed_at TEXT,
+    cancelled_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_promo_codes_status_created_at ON promo_codes(status, created_at);
 """
 
 
@@ -327,6 +344,32 @@ async def _migrate_trial_mode(db) -> None:
             await db.execute("UPDATE users SET access_kind = 'manual' WHERE id = ?", (row["id"],))
 
 
+async def _migrate_promos_and_provenance(db) -> None:
+    """Add promo state and invite provenance without modifying historic rows."""
+    await _ensure_columns(
+        db,
+        "invite_links",
+        {"access_kind": "TEXT", "access_source_id": "INTEGER"},
+    )
+    await _ensure_columns(db, "payments", {"admin_notification_attempted_at": "TEXT"})
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS promo_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL UNIQUE,
+            duration_days INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            created_by_telegram_user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            redeemed_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            redeemed_at TEXT,
+            cancelled_at TEXT
+        )
+        """
+    )
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_promo_codes_status_created_at ON promo_codes(status, created_at)")
+
+
 async def _applied_versions(db) -> set[int]:
     rows = await db.execute_fetchall("SELECT version FROM schema_migrations")
     return {row["version"] for row in rows}
@@ -368,6 +411,13 @@ async def _apply_migrations(db) -> None:
         await _migrate_trial_mode(db)
         await db.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (5, ?)",
+            (datetime_to_iso(utc_now()),),
+        )
+
+    if 6 not in applied_versions:
+        await _migrate_promos_and_provenance(db)
+        await db.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (6, ?)",
             (datetime_to_iso(utc_now()),),
         )
 

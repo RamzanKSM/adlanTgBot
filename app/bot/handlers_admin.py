@@ -13,16 +13,23 @@ from app.bot.keyboards import (
     ADMIN_DISABLE_TARIFF_CONFIRM_PREFIX,
     ADMIN_DISABLE_TARIFF_SELECT_PREFIX,
     ADMIN_TARIFFS_BUTTON,
+    ADMIN_PROMO_BUTTON,
     admin_disable_tariff_confirm_keyboard,
     admin_disable_tariffs_keyboard,
+    promo_admin_controls_keyboard,
+    promo_card_keyboard,
+    promo_confirm_keyboard,
+    promo_duration_keyboard,
     is_reply_button_text,
 )
 from app.config import Settings
 from app.db.connection import open_database
 from app.db.repositories import AccessEventsRepository, TariffsRepository, TrialSettingsRepository
 from app.messages import message as text
-from app.services.access import grant_manual_access
+from app.services.promos import PromoService
 from app.utils.datetime import format_datetime_moscow
+from app.utils.qr import qr_png
+from aiogram.types import BufferedInputFile
 
 
 router = Router(name="admin")
@@ -236,54 +243,101 @@ async def tariff_disable_cancel(callback: CallbackQuery, settings: Settings) -> 
     await callback.answer()
 
 
-@router.message(Command("grant_access"))
-async def grant_access(message: Message, settings: Settings) -> None:
-    if not _is_admin(message, settings):
-        return
-    if message.from_user is None:
-        return
-
+def _promo_days(value: str) -> int | None:
     try:
-        args = shlex.split((message.text or "").partition(" ")[2])
-        if len(args) == 1:
-            telegram_user_id = message.from_user.id
-            duration_days = int(args[0])
-            username = message.from_user.username
-            first_name = message.from_user.first_name
-            last_name = message.from_user.last_name
-        elif len(args) == 2:
-            telegram_user_id = int(args[0])
-            duration_days = int(args[1])
-            username = None
-            first_name = None
-            last_name = None
-        else:
-            raise ValueError
-        if telegram_user_id <= 0 or duration_days <= 0:
-            raise ValueError
+        days = int(value)
     except ValueError:
-        await message.answer(text("admin.grant_access_usage"))
+        return None
+    return days if 1 <= days <= 1000 else None
+
+
+def _promo_status(value: str) -> str:
+    return text(f"admin.promo_status_{value}")
+
+
+async def _show_promo_menu(message: Message) -> None:
+    await message.answer(text("admin.promo_menu"), reply_markup=promo_duration_keyboard())
+
+
+@router.message(F.text.func(lambda value: is_reply_button_text(value, ADMIN_PROMO_BUTTON)))
+async def promo_button(message: Message, settings: Settings) -> None:
+    if _is_admin(message, settings):
+        await _show_promo_menu(message)
+
+
+@router.callback_query(F.data.startswith("ap:"))
+async def promo_callbacks(callback: CallbackQuery, settings: Settings) -> None:
+    if not _is_admin_user(callback.from_user, settings) or not _is_private_callback(callback) or callback.data is None:
         return
-
-    async with open_database(settings.database_path) as db:
-        grant = await grant_manual_access(
-            db,
-            telegram_user_id=telegram_user_id,
-            duration_days=duration_days,
-            granted_by_telegram_user_id=message.from_user.id,
-            username=username,
-            first_name=first_name,
-            last_name=last_name,
+    if not isinstance(callback.message, Message):
+        return
+    parts = callback.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    if action == "menu":
+        await callback.message.edit_text(text("admin.promo_menu"), reply_markup=promo_duration_keyboard())
+    elif action in {"pick", "custom"} and len(parts) == 3:
+        days = _promo_days(parts[2])
+        if days is not None:
+            await callback.message.edit_text(text("admin.promo_custom", duration_days=days), reply_markup=promo_duration_keyboard(days))
+    elif action == "step" and len(parts) == 4:
+        current = _promo_days(parts[2])
+        try:
+            delta = int(parts[3])
+        except ValueError:
+            delta = 0
+        days = max(1, min(1000, (current or 1) + delta))
+        await callback.message.edit_text(text("admin.promo_custom", duration_days=days), reply_markup=promo_duration_keyboard(days))
+    elif action == "confirm" and len(parts) == 3:
+        days = _promo_days(parts[2])
+        if days is not None:
+            await callback.message.edit_text(text("admin.promo_confirm", duration_days=days), reply_markup=promo_confirm_keyboard(days))
+    elif action == "create" and len(parts) == 3 and callback.from_user is not None:
+        days = _promo_days(parts[2])
+        if days is not None:
+            async with open_database(settings.database_path) as db:
+                promo = await PromoService(db).create(days, callback.from_user.id)
+            bot_info = await callback.bot.get_me()
+            link = f"https://t.me/{bot_info.username}?start=promo_{promo.code}"
+            await callback.message.edit_text(text("admin.promo_menu"), reply_markup=promo_duration_keyboard())
+            await callback.message.answer_photo(
+                BufferedInputFile(qr_png(link), filename=f"promo-{promo.code}.png"),
+                caption=text("admin.promo_card", duration_days=promo.duration_days, link=link),
+                reply_markup=promo_card_keyboard(link),
+            )
+            await callback.message.answer(
+                text("admin.promo_controls", code=promo.code, duration_days=promo.duration_days, status=_promo_status(promo.status)),
+                reply_markup=promo_admin_controls_keyboard(promo.id),
+            )
+    elif action == "recent" and callback.from_user is not None:
+        async with open_database(settings.database_path) as db:
+            promos = await PromoService(db).codes.list_recent(callback.from_user.id)
+        body = text("admin.promo_empty") if not promos else text(
+            "admin.promo_recent", items="\n".join(text("admin.promo_recent_item", code=item.code, duration_days=item.duration_days, status=_promo_status(item.status)) for item in promos)
         )
-        await db.commit()
-
-    await message.answer(
-        text(
-            "admin.access_granted",
-            telegram_user_id=grant.user.telegram_user_id,
-            access_until=format_datetime_moscow(grant.user.access_until),
+        await callback.message.edit_text(body, reply_markup=promo_duration_keyboard())
+    elif action in {"status", "cancel"} and len(parts) == 3:
+        try:
+            promo_id = int(parts[2])
+        except ValueError:
+            promo_id = 0
+        async with open_database(settings.database_path) as db:
+            service = PromoService(db)
+            if action == "cancel":
+                changed = await service.codes.cancel(promo_id)
+                await db.commit()
+                if changed:
+                    await callback.message.edit_text(text("admin.promo_cancelled"))
+                    await callback.answer()
+                    return
+            promo = await service.codes.get_by_id(promo_id)
+        if promo is None:
+            await callback.answer(text("admin.promo_not_cancellable"), show_alert=True)
+            return
+        await callback.message.edit_text(
+            text("admin.promo_controls", code=promo.code, duration_days=promo.duration_days, status=_promo_status(promo.status)),
+            reply_markup=promo_admin_controls_keyboard(promo.id) if promo.status == "created" else None,
         )
-    )
+    await callback.answer()
 
 
 @router.message(Command("trial_set"))

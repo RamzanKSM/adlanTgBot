@@ -37,6 +37,8 @@ async def mock_pay(order_id: str, request: Request) -> PlainTextResponse:
             result = await payment_service.confirm_mock_payment(order_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if not result.already_applied:
+            await payment_service.notify_admins_if_newly_applied(request.app.state.bot, result)
 
         invite_service = InviteService(db, settings, request.app.state.bot)
         try:

@@ -18,17 +18,20 @@ from app.bot.keyboards import (
     main_menu_keyboard,
     payment_agreement_keyboard,
     payment_url_keyboard,
+    promo_redeem_keyboard,
     tariffs_keyboard,
 )
 from app.config import Settings
 from app.db.connection import open_database
-from app.db.repositories import TariffRecord, TariffsRepository, UsersRepository
+from app.db.repositories import PromoCodesRepository, TariffRecord, TariffsRepository, UsersRepository
 from app.legal.documents import load_legal_document_page, render_legal_document_page
 from app.messages import message as text
 from app.services.invites import InviteService
 from app.services.lava import LavaClient
 from app.services.payments import PaymentService
 from app.services.trials import TrialService
+from app.services.promos import PromoService
+from app.services.admin_notify import notify_admins
 from app.utils.datetime import format_datetime_moscow, utc_now
 
 
@@ -142,11 +145,68 @@ async def start(message: Message, settings: Settings) -> None:
             last_name=message.from_user.last_name,
         )
         trial_available = await TrialService(db).is_eligible(user)
+        payload = (message.text or "").partition(" ")[2].strip()
+        promo = None
+        if payload.startswith("promo_"):
+            code = payload.removeprefix("promo_").upper()
+            if 1 <= len(code) <= 32 and code.isalnum():
+                promo = await PromoCodesRepository(db).get_by_code(code)
         await db.commit()
+    if promo is not None and promo.status == "created":
+        await message.answer(
+            text("user.promo_offer", duration_days=promo.duration_days),
+            reply_markup=promo_redeem_keyboard(promo.id),
+        )
+        return
+    if payload.startswith("promo_"):
+        await message.answer(text("user.promo_unavailable"))
+        return
     await message.answer(
         text("user.welcome"),
         reply_markup=main_menu_keyboard(is_admin=_is_admin(message, settings), trial_available=trial_available),
     )
+
+
+@router.callback_query(F.data.startswith("pr:redeem:"))
+async def redeem_promo(callback: CallbackQuery, settings: Settings) -> None:
+    if callback.from_user is None or callback.data is None:
+        return
+    try:
+        promo_id = int(callback.data.removeprefix("pr:redeem:"))
+    except ValueError:
+        await callback.answer(text("user.promo_unavailable"), show_alert=True)
+        return
+    async with open_database(settings.database_path) as db:
+        service = PromoService(db)
+        result = await service.redeem(
+            promo_id, callback.from_user.id, callback.from_user.username,
+            callback.from_user.first_name, callback.from_user.last_name,
+        )
+        if result.status != "redeemed" or result.user is None or result.promo is None or result.access_until is None:
+            await callback.answer(text("user.promo_unavailable"), show_alert=True)
+            return
+        invite_service = InviteService(db, settings, callback.bot)
+        try:
+            link = await invite_service.ensure_personal_invite(result.user.telegram_user_id)
+        except TelegramBadRequest:
+            link = ""
+            invite_error = True
+        else:
+            invite_error = False
+    if invite_error:
+        await callback.message.answer(text("user.promo_activated_invite_error", access_until=format_datetime_moscow(result.access_until)))
+    elif link:
+        await callback.message.answer(text("user.promo_activated_with_link", access_until=format_datetime_moscow(result.access_until), link=link))
+    else:
+        await callback.message.answer(text("user.promo_activated_already_member", access_until=format_datetime_moscow(result.access_until)))
+    participant = f"@{result.user.username}" if result.user.username else (result.user.first_name or str(result.user.telegram_user_id))
+    await notify_admins(settings, callback.bot, text(
+        "admin.promo_redeemed", participant=participant, code=result.promo.code,
+        duration_days=result.promo.duration_days, access_until=format_datetime_moscow(result.access_until),
+    ))
+    if isinstance(callback.message, Message):
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer()
 
 
 @router.message(F.text.func(lambda text: is_reply_button_text(text, USER_TARIFFS_BUTTON)))

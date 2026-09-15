@@ -59,12 +59,14 @@ class InviteService:
             invite_link=link.invite_link,
             telegram_invite_link_id=getattr(link, "invite_link", None),
             expires_at=expires_at,
+            access_kind=user.access_kind,
+            access_source_id=user.access_source_id,
         )
         await self.events.add(
             telegram_user_id=telegram_user_id,
             user_id=user.id,
             event_type="invite_created",
-            details={"invite_id": invite.id, "payment_id": payment_id},
+            details={"invite_id": invite.id, "payment_id": payment_id, "access_kind": user.access_kind, "access_source_id": user.access_source_id},
         )
         await self.db.commit()
         return invite.invite_link

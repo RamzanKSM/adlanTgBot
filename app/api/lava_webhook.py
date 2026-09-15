@@ -28,6 +28,7 @@ async def lava_webhook(request: Request) -> dict[str, str]:
         payment_service = PaymentService(db, settings, lava_client)
         result = await payment_service.apply_status_notification(notification)
         if result is not None and not result.already_applied:
+            await payment_service.notify_admins_if_newly_applied(bot, result)
             invite_service = InviteService(db, settings, bot)
             link = await invite_service.ensure_personal_invite(result.telegram_user_id, result.payment_id)
             if link:

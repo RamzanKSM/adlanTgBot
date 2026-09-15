@@ -181,7 +181,7 @@ async def test_migrations_preserve_populated_legacy_database_and_are_repeatable(
     assert user["created_at"] == "2026-01-01T03:00:00+03:00"
     assert tariff["updated_at"] == "2026-01-01T03:00:00+03:00"
     assert payment["created_at"] == "2026-01-01T03:00:00+03:00"
-    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5]
+    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5, 6]
 
 
 async def test_timestamp_migration_converts_populated_v3_database_once(tmp_path) -> None:
@@ -249,7 +249,7 @@ async def test_timestamp_migration_converts_populated_v3_database_once(tmp_path)
     finally:
         await connection.close()
 
-    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5]
+    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5, 6]
 
 
 async def test_migrations_serialize_concurrent_startup(tmp_path) -> None:
@@ -264,7 +264,7 @@ async def test_migrations_serialize_concurrent_startup(tmp_path) -> None:
     finally:
         await connection.close()
 
-    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5]
+    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5, 6]
     assert {row["name"] for row in tables} >= {
         "users",
         "tariffs",

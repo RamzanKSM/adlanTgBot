@@ -60,6 +60,7 @@ def test_main_menu_keyboard_adds_admin_rows_only_for_admins() -> None:
     assert [ADMIN_TARIFFS_BUTTON, ADMIN_DISABLE_TARIFF_BUTTON] not in user_rows
     assert admin_rows == user_rows + [
         [ADMIN_TARIFFS_BUTTON, ADMIN_DISABLE_TARIFF_BUTTON],
+        ["🎁 Выдать промодоступ"],
     ]
     assert user_keyboard.is_persistent is True
 
