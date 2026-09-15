@@ -177,7 +177,7 @@ async def test_expected_personal_invite_marks_only_payer_as_group_member_and_not
     assert bot.ban_calls == []
     assert events == [("group_join_expected_user", events[0][1])]
     assert events[0][1]["invite_id"] == invite.id
-    assert bot.sent_messages and "Штатный вход" in bot.sent_messages[0][1]
+    assert bot.sent_messages and "Пользователь вошёл" in bot.sent_messages[0][1]
 
 
 async def test_join_without_access_is_logged_and_removed_without_creating_user(tmp_path) -> None:

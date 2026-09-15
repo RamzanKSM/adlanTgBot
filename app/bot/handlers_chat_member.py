@@ -3,11 +3,11 @@ from aiogram.types import ChatMemberUpdated, User
 
 from app.config import Settings
 from app.db.connection import open_database
-from app.db.repositories import AccessEventsRepository, InviteLinksRepository, UsersRepository
+from app.db.repositories import AccessEventsRepository, InviteLinkRecord, InviteLinksRepository, PaymentsRepository, PromoCodesRepository, TariffsRepository, TrialAccessesRepository, UsersRepository
 from app.messages import message
 from app.services.admin_notify import notify_admins
 from app.services.group_access import can_remove_from_group
-from app.utils.datetime import utc_now
+from app.utils.datetime import format_datetime_moscow, utc_now
 
 
 router = Router(name="chat_member")
@@ -40,6 +40,26 @@ def _format_user(user: User) -> str:
 def _has_active_access(user: object) -> bool:
     access_until = getattr(user, "access_until", None)
     return access_until is not None and access_until > utc_now()
+
+
+async def _join_source(db, invite: InviteLinkRecord) -> str:
+    """Render only provenance captured when this particular link was created."""
+    if invite.access_kind == "paid" and invite.access_source_id is not None:
+        payment = await PaymentsRepository(db).get_by_id(invite.access_source_id)
+        if payment is not None:
+            tariff = await TariffsRepository(db).get_by_id(payment.tariff_id)
+            if tariff is not None:
+                return message("admin.join_source_paid", title=tariff.title, amount=payment.amount, currency=payment.currency)
+    if invite.access_kind == "trial" and invite.access_source_id is not None:
+        trial = await TrialAccessesRepository(db).get_by_user_id(invite.user_id)
+        if trial is not None:
+            duration_days = max(1, (trial.expires_at - trial.started_at).days)
+            return message("admin.join_source_trial", duration_days=duration_days)
+    if invite.access_kind == "promo" and invite.access_source_id is not None:
+        promo = await PromoCodesRepository(db).get_by_id(invite.access_source_id)
+        if promo is not None:
+            return message("admin.join_source_promo", code=promo.code, duration_days=promo.duration_days)
+    return message("admin.join_source_unknown")
 
 
 async def _remove_participant(
@@ -177,7 +197,12 @@ async def on_chat_member(event: ChatMemberUpdated, settings: Settings) -> None:
                 await notify_admins(
                     settings,
                     event.bot,
-                    message("admin.group_join_expected_user", participant=_format_user(participant)),
+                    message(
+                        "admin.group_join_expected_user",
+                        participant=_format_user(participant),
+                        source=await _join_source(db, invite),
+                        access_until=format_datetime_moscow(expected_user.access_until),
+                    ),
                 )
                 return
 

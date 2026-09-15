@@ -5,6 +5,7 @@ import aiosqlite
 
 from app.db.repositories import (
     AccessEventsRepository,
+    PromoCodesRepository,
     TrialAccessesRepository,
     TrialSettingsRepository,
     UserRecord,
@@ -33,13 +34,14 @@ class TrialService:
         self.users = UsersRepository(db)
         self.settings = TrialSettingsRepository(db)
         self.trials = TrialAccessesRepository(db)
+        self.promos = PromoCodesRepository(db)
         self.events = AccessEventsRepository(db)
 
     async def is_eligible(self, user: UserRecord) -> bool:
         settings = await self.settings.get()
         if not settings.enabled or user_has_active_access(user):
             return False
-        return await self.trials.get_by_user_id(user.id) is None
+        return await self.trials.get_by_user_id(user.id) is None and not await self.promos.has_redeemed_by_user(user.id)
 
     async def grant(
         self,
@@ -61,6 +63,9 @@ class TrialService:
                 await self.db.commit()
                 return TrialGrantResult(status="active_access", user=user, expires_at=user.access_until)
             if await self.trials.get_by_user_id(user.id) is not None:
+                await self.db.commit()
+                return TrialGrantResult(status="already_used", user=user)
+            if await self.promos.has_redeemed_by_user(user.id):
                 await self.db.commit()
                 return TrialGrantResult(status="already_used", user=user)
 

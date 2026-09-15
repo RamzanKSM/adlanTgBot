@@ -22,7 +22,6 @@ def test_user_and_admin_command_lists() -> None:
     assert admin_names[: len(user_names)] == user_names
     assert admin_names[len(user_names) :] == [
         "tariff_set",
-        "grant_access",
         "trial_set",
         "trial_disable",
         "trial_status",

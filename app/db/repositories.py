@@ -52,6 +52,7 @@ class PaymentRecord:
     expires_at: datetime | None
     raw_payload: str
     applied_at: datetime | None
+    admin_notification_attempted_at: datetime | None
 
 
 @dataclass(slots=True)
@@ -66,6 +67,21 @@ class InviteLinkRecord:
     created_at: datetime
     used_at: datetime | None
     revoked_at: datetime | None
+    access_kind: str | None
+    access_source_id: int | None
+
+
+@dataclass(slots=True)
+class PromoCodeRecord:
+    id: int
+    code: str
+    duration_days: int
+    status: str
+    created_by_telegram_user_id: int
+    created_at: datetime
+    redeemed_by_user_id: int | None
+    redeemed_at: datetime | None
+    cancelled_at: datetime | None
 
 
 @dataclass(slots=True)
@@ -149,6 +165,7 @@ def _payment(row: aiosqlite.Row | None) -> PaymentRecord | None:
         expires_at=iso_to_datetime(row["expires_at"]),
         raw_payload=row["raw_payload"],
         applied_at=iso_to_datetime(row["applied_at"]),
+        admin_notification_attempted_at=iso_to_datetime(row["admin_notification_attempted_at"]),
     )
 
 
@@ -166,6 +183,20 @@ def _invite(row: aiosqlite.Row | None) -> InviteLinkRecord | None:
         created_at=iso_to_datetime(row["created_at"]) or utc_now(),
         used_at=iso_to_datetime(row["used_at"]),
         revoked_at=iso_to_datetime(row["revoked_at"]),
+        access_kind=row["access_kind"],
+        access_source_id=row["access_source_id"],
+    )
+
+
+def _promo(row: aiosqlite.Row | None) -> PromoCodeRecord | None:
+    if row is None:
+        return None
+    return PromoCodeRecord(
+        id=row["id"], code=row["code"], duration_days=row["duration_days"], status=row["status"],
+        created_by_telegram_user_id=row["created_by_telegram_user_id"],
+        created_at=iso_to_datetime(row["created_at"]) or utc_now(),
+        redeemed_by_user_id=row["redeemed_by_user_id"], redeemed_at=iso_to_datetime(row["redeemed_at"]),
+        cancelled_at=iso_to_datetime(row["cancelled_at"]),
     )
 
 
@@ -444,6 +475,9 @@ class PaymentsRepository:
             )
         )
 
+    async def get_by_id(self, payment_id: int) -> PaymentRecord | None:
+        return _payment(await _fetchone(self.db, "SELECT * FROM payments WHERE id = ?", (payment_id,)))
+
     async def get_by_invoice_id(self, invoice_id: str) -> PaymentRecord | None:
         return _payment(
             await _fetchone(
@@ -477,6 +511,14 @@ class PaymentsRepository:
             "UPDATE payments SET applied_at = ?, status = 'applied' WHERE id = ? AND applied_at IS NULL",
             (datetime_to_iso(applied_at), payment_id),
         )
+
+    async def claim_admin_notification(self, payment_id: int) -> bool:
+        cursor = await self.db.execute(
+            "UPDATE payments SET admin_notification_attempted_at = ? "
+            "WHERE id = ? AND admin_notification_attempted_at IS NULL",
+            (datetime_to_iso(utc_now()), payment_id),
+        )
+        return cursor.rowcount == 1
 
     async def mark_status(
         self,
@@ -513,15 +555,17 @@ class InviteLinksRepository:
         invite_link: str,
         telegram_invite_link_id: str | None,
         expires_at: datetime,
+        access_kind: str | None = None,
+        access_source_id: int | None = None,
     ) -> InviteLinkRecord:
         now = datetime_to_iso(utc_now())
         await self.db.execute(
             """
             INSERT INTO invite_links
-                (user_id, payment_id, invite_link, telegram_invite_link_id, status, expires_at, created_at)
-            VALUES (?, ?, ?, ?, 'active', ?, ?)
+                (user_id, payment_id, invite_link, telegram_invite_link_id, status, expires_at, created_at, access_kind, access_source_id)
+            VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
             """,
-            (user_id, payment_id, invite_link, telegram_invite_link_id, datetime_to_iso(expires_at), now),
+            (user_id, payment_id, invite_link, telegram_invite_link_id, datetime_to_iso(expires_at), now, access_kind, access_source_id),
         )
         row = await _fetchone(self.db, "SELECT * FROM invite_links WHERE invite_link = ?", (invite_link,))
         invite = _invite(row)
@@ -563,6 +607,53 @@ class InviteLinksRepository:
             "UPDATE invite_links SET status = 'revoked', revoked_at = ? WHERE id = ?",
             (datetime_to_iso(revoked_at), invite_id),
         )
+
+
+class PromoCodesRepository:
+    def __init__(self, db: aiosqlite.Connection):
+        self.db = db
+
+    async def create(self, code: str, duration_days: int, created_by_telegram_user_id: int) -> PromoCodeRecord:
+        await self.db.execute(
+            "INSERT INTO promo_codes (code, duration_days, status, created_by_telegram_user_id, created_at) "
+            "VALUES (?, ?, 'created', ?, ?)",
+            (code, duration_days, created_by_telegram_user_id, datetime_to_iso(utc_now())),
+        )
+        promo = await self.get_by_code(code)
+        if promo is None:
+            raise RuntimeError("failed to create promo code")
+        return promo
+
+    async def get_by_code(self, code: str) -> PromoCodeRecord | None:
+        return _promo(await _fetchone(self.db, "SELECT * FROM promo_codes WHERE code = ?", (code,)))
+
+    async def get_by_id(self, promo_id: int) -> PromoCodeRecord | None:
+        return _promo(await _fetchone(self.db, "SELECT * FROM promo_codes WHERE id = ?", (promo_id,)))
+
+    async def list_recent(self, created_by_telegram_user_id: int, limit: int = 10) -> list[PromoCodeRecord]:
+        rows = await self.db.execute_fetchall(
+            "SELECT * FROM promo_codes WHERE created_by_telegram_user_id = ? ORDER BY id DESC LIMIT ?",
+            (created_by_telegram_user_id, limit),
+        )
+        return [promo for row in rows if (promo := _promo(row))]
+
+    async def cancel(self, promo_id: int) -> bool:
+        cursor = await self.db.execute(
+            "UPDATE promo_codes SET status = 'cancelled', cancelled_at = ? WHERE id = ? AND status = 'created'",
+            (datetime_to_iso(utc_now()), promo_id),
+        )
+        return cursor.rowcount == 1
+
+    async def redeem(self, promo_id: int, user_id: int) -> bool:
+        cursor = await self.db.execute(
+            "UPDATE promo_codes SET status = 'redeemed', redeemed_by_user_id = ?, redeemed_at = ? "
+            "WHERE id = ? AND status = 'created'",
+            (user_id, datetime_to_iso(utc_now()), promo_id),
+        )
+        return cursor.rowcount == 1
+
+    async def has_redeemed_by_user(self, user_id: int) -> bool:
+        return (await _fetchone(self.db, "SELECT 1 FROM promo_codes WHERE redeemed_by_user_id = ? LIMIT 1", (user_id,))) is not None
 
 
 class TrialSettingsRepository:

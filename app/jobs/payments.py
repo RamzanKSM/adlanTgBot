@@ -17,6 +17,7 @@ async def check_pending_payments(settings: Settings, bot: Bot, lava_client: Lava
         for payment in await payments.list_pending_for_check(limit=50):
             result = await service.check_pending_payment(payment)
             if result is not None and not result.already_applied:
+                await service.notify_admins_if_newly_applied(bot, result)
                 link = await invite_service.ensure_personal_invite(result.telegram_user_id, payment_id=result.payment_id)
                 if link:
                     await bot.send_message(result.telegram_user_id, message("payment.received_with_link", link=link))

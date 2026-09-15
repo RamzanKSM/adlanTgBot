@@ -17,6 +17,8 @@ from app.db.repositories import (
 from app.messages import message
 from app.services.access import AccessExtension, calculate_access_extension
 from app.services.lava import LavaClient, LavaPaymentNotification
+from app.services.admin_notify import notify_admins_with_errors
+from app.utils.datetime import format_datetime_moscow
 from app.utils.datetime import datetime_to_iso, utc_now
 
 
@@ -217,6 +219,47 @@ class PaymentService:
             raw_payload={"mock": True, "status": "paid"},
         )
         return await self.handle_paid(notification, expected_provider="mock")
+
+    async def notify_admins_if_newly_applied(self, bot, result: PaidPaymentResult) -> None:
+        """Claim persisted notification delivery before calling Telegram.
+
+        The claim makes duplicate webhooks/status checks at-most-once. A Telegram
+        failure is recorded, but cannot roll back a paid access extension.
+        """
+        if result.already_applied or not await self.payments.claim_admin_notification(result.payment_id):
+            return
+        payment = await _payment_details(self, result.payment_id)
+        await self.db.commit()
+        if payment is None:
+            return
+        user, tariff, payment_record = payment
+        marker = "🧪" if payment_record.provider == "mock" else "💳"
+        participant = f"@{user.username}" if user.username else (user.first_name or str(user.telegram_user_id))
+        notification_text = message(
+            "admin.payment_applied", marker=marker, participant=participant,
+            telegram_user_id=user.telegram_user_id, title=tariff.title,
+            amount=payment_record.amount, currency=payment_record.currency,
+            payment_ref=payment_record.order_id, access_until=format_datetime_moscow(user.access_until),
+        )
+        errors = await notify_admins_with_errors(self.settings, bot, notification_text)
+        if errors:
+            await self.events.add(
+                telegram_user_id=user.telegram_user_id, user_id=user.id,
+                event_type="payment_admin_notification_failed",
+                details={"payment_id": result.payment_id, "errors": errors},
+            )
+            await self.db.commit()
+
+
+async def _payment_details(service: PaymentService, payment_id: int):
+    payment = await service.payments.get_by_id(payment_id)
+    if payment is None:
+        return None
+    user = await service.users.get_by_id(payment.user_id)
+    tariff = await service.tariffs.get_by_id(payment.tariff_id)
+    if user is None or tariff is None:
+        return None
+    return user, tariff, payment
 
 
 def notification_from_paid_payment(

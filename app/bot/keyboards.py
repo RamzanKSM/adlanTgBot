@@ -14,10 +14,12 @@ USER_TRIAL_BUTTON = message("button.user_trial")
 
 ADMIN_TARIFFS_BUTTON = message("button.admin_tariffs")
 ADMIN_DISABLE_TARIFF_BUTTON = message("button.admin_disable_tariff")
+ADMIN_PROMO_BUTTON = message("button.admin_promo")
 
 ADMIN_DISABLE_TARIFF_SELECT_PREFIX = "adtd:s:"
 ADMIN_DISABLE_TARIFF_CONFIRM_PREFIX = "adtd:c:"
 ADMIN_DISABLE_TARIFF_CANCEL = "adtd:x"
+PROMO_PREFIX = "ap:"
 
 
 def reply_text_key(text: str | None) -> str:
@@ -51,6 +53,7 @@ def main_menu_keyboard(*, is_admin: bool = False, trial_available: bool = False)
                     KeyboardButton(text=ADMIN_TARIFFS_BUTTON),
                     KeyboardButton(text=ADMIN_DISABLE_TARIFF_BUTTON),
                 ],
+                [KeyboardButton(text=ADMIN_PROMO_BUTTON)],
             ]
         )
     return ReplyKeyboardMarkup(
@@ -169,3 +172,47 @@ def admin_disable_tariff_confirm_keyboard(code: str) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def promo_duration_keyboard(days: int | None = None) -> InlineKeyboardMarkup:
+    if days is None:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=message("button.promo_7"), callback_data="ap:pick:7"),
+             InlineKeyboardButton(text=message("button.promo_30"), callback_data="ap:pick:30"),
+             InlineKeyboardButton(text=message("button.promo_60"), callback_data="ap:pick:60")],
+            [InlineKeyboardButton(text=message("button.promo_custom"), callback_data="ap:custom:30")],
+            [InlineKeyboardButton(text=message("button.promo_recent"), callback_data="ap:recent")],
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=message("button.promo_minus_30"), callback_data=f"ap:step:{days}:-30"),
+         InlineKeyboardButton(text=message("button.promo_minus_7"), callback_data=f"ap:step:{days}:-7"),
+         InlineKeyboardButton(text=message("button.promo_minus_1"), callback_data=f"ap:step:{days}:-1")],
+        [InlineKeyboardButton(text=message("button.promo_plus_1"), callback_data=f"ap:step:{days}:1"),
+         InlineKeyboardButton(text=message("button.promo_plus_7"), callback_data=f"ap:step:{days}:7"),
+         InlineKeyboardButton(text=message("button.promo_plus_30"), callback_data=f"ap:step:{days}:30")],
+        [InlineKeyboardButton(text=message("button.promo_create"), callback_data=f"ap:confirm:{days}")],
+        [InlineKeyboardButton(text=message("button.back"), callback_data="ap:menu")],
+    ])
+
+
+def promo_confirm_keyboard(days: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=message("button.promo_create"), callback_data=f"ap:create:{days}")],
+        [InlineKeyboardButton(text=message("button.back"), callback_data=f"ap:custom:{days}")],
+    ])
+
+
+def promo_card_keyboard(link: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=message("button.promo_activate_link"), url=link)]])
+
+
+def promo_admin_controls_keyboard(promo_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=message("button.promo_status"), callback_data=f"ap:status:{promo_id}"),
+         InlineKeyboardButton(text=message("button.promo_cancel"), callback_data=f"ap:cancel:{promo_id}")],
+        [InlineKeyboardButton(text=message("button.promo_another"), callback_data="ap:menu")],
+    ])
+
+
+def promo_redeem_keyboard(promo_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=message("button.promo_redeem"), callback_data=f"pr:redeem:{promo_id}")]])
