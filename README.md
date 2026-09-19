@@ -233,6 +233,14 @@ telegram.message chat_id=... chat_type=... user_id=... username=... message_type
 
 По умолчанию `AI_ENABLED=false`. При `true` отдельный `ai-worker` владеет scheduler'ом кандидатов и очереди ответов; polling bot и API его не запускают. Не включайте Telegram webhook одновременно с polling для одного и того же bot token.
 
+### Диагностика LLM
+
+Для временной диагностики маршрутизации, игнорирования и Telegram-цитирования установите `AI_DEBUG_LOGGING=true` и перезапустите только `ai-worker`. Пока флаг включён, его stdout содержит структурированные JSON-события с полным instruction/prompt, JSON stdin (включая текст пользователя и найденные фрагменты базы), разобранным JSON-ответом LLM, решением роутера, ID найденных сообщений и причиной отказа/отката Telegram-native цитаты. Это намеренно чувствительные логи: не оставляйте флаг включённым постоянно и не пересылайте такие логи в небезопасные каналы. Распознаваемые токены и секреты маскируются; переменные окружения и вывод Codex CLI в эти события не попадают.
+
+```bash
+docker compose logs -f ai-worker
+```
+
 `ai-worker` собирается с закреплённым официальным `@openai/codex@0.155.1` и хранит CLI-auth в отдельном persistent bind mount `/root/adlanbot/codex-home:/app/codex-home`. После отдельного согласования server batch выполните один раз: `docker compose run --rm ai-worker codex login --device-auth`. Worker запускает `codex exec --model "$AI_WORKER_MODEL" --config 'model_reasoning_effort="$AI_WORKER_REASONING_EFFORT"' --ephemeral --ignore-user-config --ignore-rules --sandbox read-only --skip-git-repo-check --output-schema ... -o ...`, без shell и с JSON Schema. По умолчанию это `gpt-5.6-luna` и `medium`; значения валидируются через `AI_WORKER_MODEL` и `AI_WORKER_REASONING_EFFORT`. До этой подготовки не включайте `AI_ENABLED`; локальные тесты не проверяют реальную авторизацию Codex, Telegram или загрузку модели.
 
 В image пользователь `app` имеет UID/GID `10001`. В будущий отдельно согласованный server batch до первого запуска должны войти `install -d -o 10001 -g 10001 /root/adlanbot/models /root/adlanbot/codex-home`; это делает bind mounts доступными и FastEmbed, и `codex login --device-auth`. Эти команды здесь не выполнялись.

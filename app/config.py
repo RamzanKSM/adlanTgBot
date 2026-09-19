@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     scheduler_interval_seconds: int = 60
     pending_payment_check_seconds: int = 300
     ai_enabled: bool = False
+    # This is deliberately opt-in because LLM input can contain complete
+    # Telegram messages and retrieved channel knowledge.
+    ai_debug_logging: bool = False
     ai_turn_debounce_seconds: int = 30
     ai_recent_context_limit: int = 40
     ai_retrieval_top_k: int = 10

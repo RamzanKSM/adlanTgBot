@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import timedelta
 
@@ -9,7 +10,7 @@ from aiogram.types import ReplyParameters
 
 from app.ai.knowledge import KnowledgeIndex, KnowledgeIngestionService
 from app.ai.repositories import AiRepository
-from app.ai.worker import CodexCliWorker
+from app.ai.worker import CodexCliWorker, redact_debug_data
 from app.bot.handlers_chat_member import onboarding_greeting
 from app.services.admin_notify import notify_admins
 from app.config import Settings
@@ -34,50 +35,59 @@ def _worker(settings: Settings) -> CodexCliWorker:
         settings.ai_worker_timeout_seconds,
         settings.ai_worker_model,
         settings.ai_worker_reasoning_effort,
+        settings.ai_debug_logging,
     )
 
 
-async def _validated_reply_parameters(db, *, chat_id: int, retrieved, source_message_id: int | None, quote: str | None) -> ReplyParameters | None:
+def _debug_log(settings: Settings, event: str, **fields: object) -> None:
+    """Keep sensitive LLM diagnostics strictly behind AI_DEBUG_LOGGING."""
+    if settings.ai_debug_logging:
+        logger.info("%s", json.dumps(redact_debug_data({"event": event, **fields}), ensure_ascii=False, separators=(",", ":"), default=str))
+
+
+async def _validated_reply_parameters(db, *, chat_id: int, retrieved, source_message_id: int | None, quote: str | None) -> tuple[ReplyParameters | None, str]:
     """Build a Telegram-native source reference only from this turn's hits."""
     if source_message_id is None:
-        return None
+        return None, "no_source_message_id"
     allowed_source_ids = {
         int(item.source_telegram_message_id)
         for item in retrieved
         if int(item.source_chat_id) == chat_id
     }
     if source_message_id not in allowed_source_ids:
-        return None
+        return None, "source_not_retrieved_for_chat"
     row = await (await db.execute(
         "SELECT text FROM telegram_messages WHERE chat_id = ? AND telegram_message_id = ?",
         (chat_id, source_message_id),
     )).fetchone()
     if row is None:
-        return None
+        return None, "source_message_not_found"
     if quote is None:
-        return ReplyParameters(message_id=source_message_id, allow_sending_without_reply=True)
+        return ReplyParameters(message_id=source_message_id, allow_sending_without_reply=True), "source_reply_valid"
     if not quote or len(quote) > 1024:
-        return None
+        return None, "quote_empty_or_too_long"
     char_position = row["text"].find(quote)
     if char_position < 0:
-        return None
+        return None, "quote_not_exact_substring"
     utf16_position = len(row["text"][:char_position].encode("utf-16-le")) // 2
     return ReplyParameters(
         message_id=source_message_id,
         allow_sending_without_reply=True,
         quote=quote,
         quote_position=utf16_position,
-    )
+    ), "native_quote_valid"
 
 
-async def _send_response(bot: Bot, chat_id: int, text: str, reply_parameters: ReplyParameters | None):
+async def _send_response(bot: Bot, chat_id: int, text: str, reply_parameters: ReplyParameters | None, *, debug_logging: bool = False):
     """A rejected native quote must not make a valid answer/turn retry forever."""
     if reply_parameters is None:
-        return await bot.send_message(chat_id, text), None
+        return await bot.send_message(chat_id, text), None, "sent_without_reference"
     try:
-        return await bot.send_message(chat_id, text, reply_parameters=reply_parameters), reply_parameters.message_id
+        return await bot.send_message(chat_id, text, reply_parameters=reply_parameters), reply_parameters.message_id, "sent_with_native_reference"
     except TelegramBadRequest:
-        return await bot.send_message(chat_id, text), None
+        if debug_logging:
+            logger.info("%s", json.dumps({"event": "answer.reference_delivery", "chat_id": chat_id, "result": "sent_without_reference", "reason": "telegram_bad_request"}, separators=(",", ":")))
+        return await bot.send_message(chat_id, text), None, "telegram_bad_request_fallback"
 
 
 async def _persist_successful_response(
@@ -135,6 +145,13 @@ async def process_knowledge_candidates(settings: Settings) -> None:
         for candidate in await repo.pending_candidates():
             try:
                 decision = await _worker(settings).classify(candidate["text"])
+                _debug_log(
+                    settings,
+                    "classify.decision",
+                    message_row_id=candidate["telegram_message_row_id"],
+                    decision=decision.decision,
+                    reason=decision.reason,
+                )
                 if decision.decision == "include":
                     count = await KnowledgeIngestionService(repo, KnowledgeIndex(db, cache_dir=settings.ai_embedding_cache_dir)).include(candidate["telegram_message_row_id"], candidate["text"], decision.reason, "codex-cli-json-v2")
                     await repo.audit("classify", "include", message_row_id=candidate["telegram_message_row_id"], counts={"chunks": count})
@@ -142,6 +159,12 @@ async def process_knowledge_candidates(settings: Settings) -> None:
                     await repo.set_candidate_result(candidate["telegram_message_row_id"], state=decision.decision, reason=decision.reason, profile="codex-cli-json-v2")
                     await repo.audit("classify", decision.decision, message_row_id=candidate["telegram_message_row_id"])
             except Exception as exc:
+                _debug_log(
+                    settings,
+                    "classify.error",
+                    message_row_id=candidate["telegram_message_row_id"],
+                    error_type=type(exc).__name__,
+                )
                 await repo.fail_candidate(candidate["telegram_message_row_id"], "codex-cli-json-v2", type(exc).__name__, max_attempts=settings.ai_retry_max_attempts, base_seconds=settings.ai_retry_base_seconds)
                 await repo.audit("classify", "retry", message_row_id=candidate["telegram_message_row_id"], safe_error=type(exc).__name__)
             await db.commit()
@@ -194,6 +217,19 @@ async def process_due_ai_turns(settings: Settings, bot: Bot) -> None:
                 recent = [{"sender_telegram_user_id": row["sender_telegram_user_id"], "author_display_name": row["author_display_name"], "telegram_message_id": row["telegram_message_id"], "created_at": row["created_at"], "direction": row["direction"], "text": row["text"]} for row in reversed(await repo.recent_messages(turn["chat_id"], settings.ai_recent_context_limit))]
                 await db.commit()
                 route = await _worker(settings).route(question, [{"onboarding_pending": onboarding_pending, "user": {"id": turn["telegram_user_id"], "username": user["author_username"] if user else None, "display_name": user["author_display_name"] if user else None}, "messages": recent}])
+                _debug_log(
+                    settings,
+                    "route.decision",
+                    chat_id=turn["chat_id"],
+                    telegram_user_id=turn["telegram_user_id"],
+                    turn_id=turn["id"],
+                    response_mode=route.effective_response_mode,
+                    should_respond=route.should_respond,
+                    needs_search=route.needs_search,
+                    escalate=route.escalate,
+                    session_active=route.session_active,
+                    reason=route.reason,
+                )
                 await repo.audit("router", "ok", chat_id=turn["chat_id"], telegram_user_id=turn["telegram_user_id"], turn_id=turn["id"])
                 await db.commit()
                 if route.escalate:
@@ -204,12 +240,37 @@ async def process_due_ai_turns(settings: Settings, bot: Bot) -> None:
                 # response_mode is the authoritative decision. should_respond
                 # remains in the schema for backward-compatible telemetry.
                 if route.effective_response_mode == "no_response":
+                    _debug_log(
+                        settings,
+                        "turn.silenced",
+                        chat_id=turn["chat_id"],
+                        telegram_user_id=turn["telegram_user_id"],
+                        turn_id=turn["id"],
+                        reason="router_no_response",
+                        router_reason=route.reason,
+                    )
                     await repo.set_state(turn["chat_id"], turn["telegram_user_id"], "assistant.session", {"active": False})
                     await repo.finish_turn(turn["id"])
                     await db.commit()
                     continue
                 if route.effective_response_mode == "out_of_scope":
-                    sent, reply_to = await _send_response(bot, turn["chat_id"], OUT_OF_SCOPE_REPLY, None)
+                    _debug_log(
+                        settings,
+                        "turn.response_mode",
+                        chat_id=turn["chat_id"],
+                        telegram_user_id=turn["telegram_user_id"],
+                        turn_id=turn["id"],
+                        mode="out_of_scope",
+                        reason=route.reason,
+                    )
+                    sent, reply_to, delivery_result = await _send_response(
+                        bot,
+                        turn["chat_id"],
+                        OUT_OF_SCOPE_REPLY,
+                        None,
+                        debug_logging=settings.ai_debug_logging,
+                    )
+                    _debug_log(settings, "turn.delivery", turn_id=turn["id"], result=delivery_result)
                     await _persist_successful_response(
                         repo,
                         turn=turn,
@@ -228,12 +289,45 @@ async def process_due_ai_turns(settings: Settings, bot: Bot) -> None:
                     # A substantive reply without retrieval is never allowed,
                     # even if an invalid router result attempts to request it.
                     await repo.audit("router", "forced_search", chat_id=turn["chat_id"], telegram_user_id=turn["telegram_user_id"], turn_id=turn["id"])
+                    _debug_log(
+                        settings,
+                        "route.forced_search",
+                        chat_id=turn["chat_id"],
+                        telegram_user_id=turn["telegram_user_id"],
+                        turn_id=turn["id"],
+                        reason="response_mode_answer_requires_retrieval",
+                    )
                     await db.commit()
                 retrieved = await KnowledgeIndex(db, cache_dir=settings.ai_embedding_cache_dir).search(question, top_k=settings.ai_retrieval_top_k, context_char_budget=settings.ai_retrieval_context_chars)
+                _debug_log(
+                    settings,
+                    "retrieve.result",
+                    chat_id=turn["chat_id"],
+                    telegram_user_id=turn["telegram_user_id"],
+                    turn_id=turn["id"],
+                    retrieved_count=len(retrieved),
+                    retrieved_source_telegram_message_ids=[item.source_telegram_message_id for item in retrieved],
+                )
                 await repo.audit("retrieve", "ok", chat_id=turn["chat_id"], telegram_user_id=turn["telegram_user_id"], turn_id=turn["id"], counts={"chunks": len(retrieved)})
                 await db.commit()
                 if not retrieved:
-                    sent, reply_to = await _send_response(bot, turn["chat_id"], KNOWLEDGE_NOT_FOUND_REPLY, None)
+                    _debug_log(
+                        settings,
+                        "turn.response_mode",
+                        chat_id=turn["chat_id"],
+                        telegram_user_id=turn["telegram_user_id"],
+                        turn_id=turn["id"],
+                        mode="knowledge_not_found",
+                        reason="no_retrieved_knowledge",
+                    )
+                    sent, reply_to, delivery_result = await _send_response(
+                        bot,
+                        turn["chat_id"],
+                        KNOWLEDGE_NOT_FOUND_REPLY,
+                        None,
+                        debug_logging=settings.ai_debug_logging,
+                    )
+                    _debug_log(settings, "turn.delivery", turn_id=turn["id"], result=delivery_result)
                     await _persist_successful_response(
                         repo,
                         turn=turn,
@@ -251,15 +345,52 @@ async def process_due_ai_turns(settings: Settings, bot: Bot) -> None:
                 answer = await _worker(settings).answer(question, [{"text": item.text, "source_message_id": item.source_telegram_message_id, "distance": item.distance} for item in retrieved], [{"onboarding_pending": onboarding_pending, "user_id": turn["telegram_user_id"], "messages": recent}])
                 await repo.audit("agent", "ok", chat_id=turn["chat_id"], telegram_user_id=turn["telegram_user_id"], turn_id=turn["id"])
                 await db.commit()
-                reply_parameters = await _validated_reply_parameters(
+                reply_parameters, reference_validation = await _validated_reply_parameters(
                     db,
                     chat_id=turn["chat_id"],
                     retrieved=retrieved,
                     source_message_id=answer.source_message_id,
                     quote=answer.quote,
                 )
-                sent, reply_to = await _send_response(bot, turn["chat_id"], answer.text, reply_parameters)
+                _debug_log(
+                    settings,
+                    "answer.reference_validation",
+                    chat_id=turn["chat_id"],
+                    telegram_user_id=turn["telegram_user_id"],
+                    turn_id=turn["id"],
+                    source_message_id=answer.source_message_id,
+                    quote_present=answer.quote is not None,
+                    quote_chars=len(answer.quote) if answer.quote is not None else 0,
+                    result="valid" if reply_parameters is not None else "fallback_without_reference",
+                    reason=reference_validation,
+                )
+                sent, reply_to, delivery_result = await _send_response(
+                    bot,
+                    turn["chat_id"],
+                    answer.text,
+                    reply_parameters,
+                    debug_logging=settings.ai_debug_logging,
+                )
+                _debug_log(
+                    settings,
+                    "answer.delivery",
+                    chat_id=turn["chat_id"],
+                    telegram_user_id=turn["telegram_user_id"],
+                    turn_id=turn["id"],
+                    result=delivery_result,
+                    reply_to_telegram_message_id=reply_to,
+                )
                 active = answer.session_active or route.session_active
+                _debug_log(
+                    settings,
+                    "answer.session",
+                    chat_id=turn["chat_id"],
+                    telegram_user_id=turn["telegram_user_id"],
+                    turn_id=turn["id"],
+                    answer_session_active=answer.session_active,
+                    route_session_active=route.session_active,
+                    effective_session_active=active,
+                )
                 await _persist_successful_response(
                     repo,
                     turn=turn,
@@ -273,6 +404,14 @@ async def process_due_ai_turns(settings: Settings, bot: Bot) -> None:
                     retrieved_count=len(retrieved),
                 )
             except Exception as exc:
+                _debug_log(
+                    settings,
+                    "turn.retry",
+                    chat_id=turn["chat_id"],
+                    telegram_user_id=turn["telegram_user_id"],
+                    turn_id=turn["id"],
+                    error_type=type(exc).__name__,
+                )
                 await repo.retry_turn(turn["id"], type(exc).__name__, max_attempts=settings.ai_retry_max_attempts, base_seconds=settings.ai_retry_base_seconds)
                 await repo.audit("turn", "retry", chat_id=turn["chat_id"], telegram_user_id=turn["telegram_user_id"], turn_id=turn["id"], safe_error=type(exc).__name__)
             await db.commit()
