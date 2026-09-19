@@ -1,7 +1,8 @@
 from aiogram import Router
-from aiogram.types import ChatMemberUpdated, User
+from aiogram.types import ChatMemberUpdated, MessageEntity, User
 
 from app.config import Settings
+from app.ai.repositories import AiRepository
 from app.db.connection import open_database
 from app.db.repositories import AccessEventsRepository, InviteLinkRecord, InviteLinksRepository, PaymentsRepository, PromoCodesRepository, TariffsRepository, TrialAccessesRepository, UsersRepository
 from app.messages import message
@@ -12,6 +13,13 @@ from app.utils.datetime import format_datetime_moscow, utc_now
 
 router = Router(name="chat_member")
 MEMBER_STATUSES = {"member", "administrator", "creator"}
+ONBOARDING_GREETING = "{name}, добро пожаловать! Расскажи, с какой задачей или вопросом ты пришёл — я помогу сориентироваться."
+
+
+def onboarding_greeting(telegram_user_id: int, display_name: str) -> tuple[str, list[MessageEntity]]:
+    name = display_name or "Участник"
+    text = ONBOARDING_GREETING.format(name=name)
+    return text, [MessageEntity(type="text_link", offset=0, length=len(name.encode("utf-16-le")) // 2, url=f"tg://user?id={telegram_user_id}")]
 
 
 def _status_value(value: object) -> str:
@@ -114,6 +122,42 @@ async def _revoke_personal_invite(
     return None
 
 
+async def _start_onboarding(repo: AiRepository, chat_id: int, telegram_user_id: int, display_name: str) -> bool:
+    """Record the intent before Telegram I/O; retries remain idempotent."""
+    if await repo.get_state(chat_id, telegram_user_id, "onboarding.completed") is not None:
+        return False
+    awaiting = await repo.get_state(chat_id, telegram_user_id, "onboarding.awaiting")
+    if awaiting and awaiting.get("greeting_sent"):
+        return False
+    await repo.set_state(chat_id, telegram_user_id, "onboarding.awaiting", {"greeting_sent": False, "display_name": display_name[:128], "attempts": 0})
+    return True
+
+
+async def _send_onboarding(event: ChatMemberUpdated, settings: Settings, telegram_user_id: int, display_name: str) -> None:
+    greeting, entities = onboarding_greeting(telegram_user_id, display_name)
+    try:
+        sent = await event.bot.send_message(settings.telegram_group_id, greeting, entities=entities)
+    except Exception:
+        # The durable unsent state makes a later admission event retryable; no
+        # user text or secrets enter this log.
+        return
+    if sent is None or not hasattr(sent, "message_id"):
+        return
+    async with open_database(settings.database_path) as db:
+        repo = AiRepository(db)
+        await repo.store_message(
+            chat_id=settings.telegram_group_id,
+            telegram_message_id=sent.message_id,
+            sender_telegram_user_id=getattr(getattr(sent, "from_user", None), "id", None),
+            sender_chat_id=None,
+            direction="outgoing", message_kind="text", text=greeting,
+            reply_to_telegram_message_id=None, created_at=getattr(sent, "date", None),
+        )
+        await repo.set_state(settings.telegram_group_id, telegram_user_id, "onboarding.awaiting", {"greeting_sent": True, "display_name": display_name[:128]})
+        await repo.audit("send", "ok", chat_id=settings.telegram_group_id, telegram_user_id=telegram_user_id)
+        await db.commit()
+
+
 @router.chat_member()
 async def on_chat_member(event: ChatMemberUpdated, settings: Settings) -> None:
     if event.chat.id != settings.telegram_group_id:
@@ -193,7 +237,11 @@ async def on_chat_member(event: ChatMemberUpdated, settings: Settings) -> None:
                     event_type="group_join_expected_user",
                     details={**details, "invite_id": invite.id, "expected_user_id": expected_user.telegram_user_id},
                 )
+                display_name = " ".join(part for part in (participant.first_name, participant.last_name) if part) or participant.username or "Участник"
+                onboarding_started = settings.ai_enabled and await _start_onboarding(AiRepository(db), event.chat.id, telegram_user_id, display_name)
                 await db.commit()
+                if onboarding_started:
+                    await _send_onboarding(event, settings, telegram_user_id, display_name)
                 await notify_admins(
                     settings,
                     event.bot,
@@ -250,10 +298,14 @@ async def on_chat_member(event: ChatMemberUpdated, settings: Settings) -> None:
                     details={**untracked_details, "action": "allowed_active_access"},
                 )
                 action = "allowed_active_access"
+                display_name = " ".join(part for part in (participant.first_name, participant.last_name) if part) or participant.username or "Участник"
+                onboarding_started = settings.ai_enabled and await _start_onboarding(AiRepository(db), event.chat.id, telegram_user_id, display_name)
             else:
                 await events.add(telegram_user_id=telegram_user_id, event_type=event_type, details=untracked_details)
                 action = await _remove_participant(event, settings, events, telegram_user_id, untracked_details)
             await db.commit()
+            if action == "allowed_active_access" and onboarding_started:
+                await _send_onboarding(event, settings, telegram_user_id, display_name)
             await notify_admins(
                 settings,
                 event.bot,
@@ -270,6 +322,8 @@ async def on_chat_member(event: ChatMemberUpdated, settings: Settings) -> None:
                 details={**details, "action": "allowed_active_access"},
             )
             action = "allowed_active_access"
+            display_name = " ".join(part for part in (participant.first_name, participant.last_name) if part) or participant.username or "Участник"
+            onboarding_started = settings.ai_enabled and await _start_onboarding(AiRepository(db), event.chat.id, telegram_user_id, display_name)
         else:
             await events.add(
                 telegram_user_id=telegram_user_id,
@@ -278,6 +332,8 @@ async def on_chat_member(event: ChatMemberUpdated, settings: Settings) -> None:
             )
             action = await _remove_participant(event, settings, events, telegram_user_id, details)
         await db.commit()
+        if action == "allowed_active_access" and onboarding_started:
+            await _send_onboarding(event, settings, telegram_user_id, display_name)
         await notify_admins(
             settings,
             event.bot,

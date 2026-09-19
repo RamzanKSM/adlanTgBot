@@ -223,6 +223,20 @@ telegram.message chat_id=... chat_type=... user_id=... username=... message_type
 
 Полный текст сообщений и payload webhook не логируются. Для получения `TELEGRAM_GROUP_ID` используйте `chat_id` из этих логов: в группе бот не отвечает на команды, но входящие сообщения продолжат логироваться. Для получения ID администратора используйте внешние способы Telegram или временно возьмите `user_id` из этих логов после сообщения администратора в личке с ботом или в группе.
 
+## Групповая база знаний и помощник
+
+Начиная с миграции 7, каждое входящее групповое `text` или `caption` сохраняется в SQLite; текст не пишется в stdout. Сообщения администратора из `ADMIN_IDS` становятся кандидатами базы знаний. До индексации отдельный worker классифицирует их как `include`, `exclude` или `review`; в индекс попадают только `include`. Изменение сообщения сбрасывает его классификацию и чанки.
+
+Векторный профиль фиксирован: `fastembed==0.8.0`, модель `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, 384 измерения, mean pooling, cosine в `sqlite-vec==0.1.9`. Обычная миграция не загружает SQLite extension, поэтому применима и до установки векторных зависимостей. Compose хранит веса FastEmbed в `/root/adlanbot/models:/app/models` (`AI_EMBEDDING_CACHE_DIR=/app/models/fastembed`).
+
+По умолчанию `AI_ENABLED=false`. При `true` отдельный `ai-worker` владеет scheduler'ом кандидатов и очереди ответов; polling bot и API его не запускают. Не включайте Telegram webhook одновременно с polling для одного и того же bot token.
+
+`ai-worker` собирается с закреплённым официальным `@openai/codex@0.155.1` и хранит CLI-auth в отдельном persistent bind mount `/root/adlanbot/codex-home:/app/codex-home`. После отдельного согласования server batch выполните один раз: `docker compose run --rm ai-worker codex login --device-auth`. Worker запускает `codex exec --ephemeral --ignore-user-config --ignore-rules --sandbox read-only --skip-git-repo-check --output-schema ... -o ...`, без shell и с JSON Schema. До этой подготовки не включайте `AI_ENABLED`; локальные тесты не проверяют реальную авторизацию Codex, Telegram или загрузку модели.
+
+В image пользователь `app` имеет UID/GID `10001`. В будущий отдельно согласованный server batch до первого запуска должны войти `install -d -o 10001 -g 10001 /root/adlanbot/models /root/adlanbot/codex-home`; это делает bind mounts доступными и FastEmbed, и `codex login --device-auth`. Эти команды здесь не выполнялись.
+
+После сознательного изменения embedding/chunk profile rebuild выполняется отдельной командой worker image: `docker compose run --rm ai-worker python -m app.ai.rebuild`. При несовпадающем профиле обычный worker отказывается индексировать до rebuild.
+
 ## Меню и команды бота
 
 Основной пользовательский UX построен на Reply-клавиатуре в личном чате. При `/start` бот регистрирует пользователя и показывает кнопки:

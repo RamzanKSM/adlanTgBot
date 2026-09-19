@@ -6,7 +6,7 @@ from app.bot.handlers_chat_member import on_chat_member
 from app.bot.handlers_group_service import delete_join_service_message
 from app.config import Settings
 from app.db.connection import connect_database
-from app.db.migrations import SCHEMA_SQL
+from app.db.migrations import run_migrations
 from app.db.repositories import InviteLinksRepository, UsersRepository
 from app.utils.datetime import utc_now
 
@@ -37,7 +37,7 @@ class FakeBot:
     async def revoke_chat_invite_link(self, chat_id: int, invite_link: str) -> None:
         self.revoke_calls.append((chat_id, invite_link))
 
-    async def send_message(self, chat_id: int, text: str) -> None:
+    async def send_message(self, chat_id: int, text: str, **kwargs) -> None:
         self.sent_messages.append((chat_id, text))
 
 
@@ -85,10 +85,7 @@ def _join_event(bot: FakeBot, participant: SimpleNamespace, invite_link: str | N
 
 
 async def _prepare_database(settings: Settings) -> None:
-    db = await connect_database(settings.database_path)
-    await db.executescript(SCHEMA_SQL)
-    await db.commit()
-    await db.close()
+    await run_migrations(str(settings.database_path))
 
 
 async def _create_user(settings: Settings, telegram_user_id: int, active: bool = True):
@@ -177,7 +174,8 @@ async def test_expected_personal_invite_marks_only_payer_as_group_member_and_not
     assert bot.ban_calls == []
     assert events == [("group_join_expected_user", events[0][1])]
     assert events[0][1]["invite_id"] == invite.id
-    assert bot.sent_messages and "Пользователь вошёл" in bot.sent_messages[0][1]
+    assert not any("добро пожаловать" in sent_text.casefold() for _, sent_text in bot.sent_messages)
+    assert any("Пользователь вошёл" in sent_text for _, sent_text in bot.sent_messages)
 
 
 async def test_join_without_access_is_logged_and_removed_without_creating_user(tmp_path) -> None:

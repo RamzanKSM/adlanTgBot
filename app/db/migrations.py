@@ -370,6 +370,132 @@ async def _migrate_promos_and_provenance(db) -> None:
     await db.execute("CREATE INDEX IF NOT EXISTS idx_promo_codes_status_created_at ON promo_codes(status, created_at)")
 
 
+async def _migrate_ai_knowledge(db) -> None:
+    """Create relational AI state without requiring a SQLite extension.
+
+    sqlite-vec is deliberately not loaded by the migration process: an older
+    image can still make the database upgrade safely.  The vector virtual table
+    is created lazily by the knowledge index on connections that loaded the
+    extension successfully.
+    """
+    schema_sql = """
+        CREATE TABLE IF NOT EXISTS telegram_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            telegram_message_id INTEGER NOT NULL,
+            sender_telegram_user_id INTEGER,
+            sender_chat_id INTEGER,
+            direction TEXT NOT NULL CHECK(direction IN ('incoming', 'outgoing')),
+            message_kind TEXT NOT NULL CHECK(message_kind IN ('text', 'caption')),
+            text TEXT NOT NULL,
+            reply_to_telegram_message_id INTEGER,
+            created_at TEXT NOT NULL,
+            edited_at TEXT,
+            deleted_at TEXT,
+            content_hash TEXT NOT NULL,
+            author_username TEXT,
+            author_first_name TEXT,
+            author_last_name TEXT,
+            author_display_name TEXT,
+            message_thread_id INTEGER,
+            UNIQUE(chat_id, telegram_message_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_telegram_messages_chat_created
+            ON telegram_messages(chat_id, created_at, id);
+
+        CREATE TABLE IF NOT EXISTS knowledge_messages (
+            telegram_message_row_id INTEGER PRIMARY KEY
+                REFERENCES telegram_messages(id) ON DELETE CASCADE,
+            candidate_state TEXT NOT NULL CHECK(candidate_state IN ('pending', 'include', 'exclude', 'review', 'failed')),
+            classification_reason TEXT,
+            classifier_profile TEXT,
+            classifier_attempts INTEGER NOT NULL DEFAULT 0,
+            classified_at TEXT,
+            last_error TEXT,
+            next_attempt_at TEXT,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_knowledge_messages_state
+            ON knowledge_messages(candidate_state, updated_at);
+
+        CREATE TABLE IF NOT EXISTS knowledge_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_message_row_id INTEGER NOT NULL REFERENCES telegram_messages(id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL,
+            raw_start_char INTEGER NOT NULL,
+            raw_end_char INTEGER NOT NULL,
+            raw_start_utf16 INTEGER NOT NULL,
+            raw_end_utf16 INTEGER NOT NULL,
+            embedding_text TEXT NOT NULL,
+            token_count INTEGER NOT NULL,
+            content_hash TEXT NOT NULL,
+            chunk_profile TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(telegram_message_row_id, ordinal)
+        );
+        CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_message ON knowledge_chunks(telegram_message_row_id, ordinal);
+
+        CREATE TABLE IF NOT EXISTS user_turns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            telegram_user_id INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('pending', 'processing', 'completed', 'failed')),
+            due_at TEXT NOT NULL,
+            claimed_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            next_attempt_at TEXT,
+            lease_until TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_turns_due ON user_turns(status, due_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_user_turns_one_active
+            ON user_turns(chat_id, telegram_user_id) WHERE status = 'pending';
+
+        CREATE TABLE IF NOT EXISTS user_turn_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            turn_id INTEGER NOT NULL REFERENCES user_turns(id) ON DELETE CASCADE,
+            telegram_message_row_id INTEGER NOT NULL REFERENCES telegram_messages(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL,
+            UNIQUE(turn_id, telegram_message_row_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS conversational_states (
+            chat_id INTEGER NOT NULL,
+            telegram_user_id INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            value_json TEXT NOT NULL DEFAULT '{}',
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(chat_id, telegram_user_id, state)
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            chat_id INTEGER,
+            telegram_user_id INTEGER,
+            telegram_message_row_id INTEGER REFERENCES telegram_messages(id) ON DELETE SET NULL,
+            turn_id INTEGER REFERENCES user_turns(id) ON DELETE SET NULL,
+            counts_json TEXT NOT NULL DEFAULT '{}',
+            duration_ms INTEGER,
+            safe_error TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_audit_events_created ON ai_audit_events(created_at, id);
+        CREATE TABLE IF NOT EXISTS embedding_profiles (
+            id INTEGER PRIMARY KEY CHECK (id = 1), profile_json TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        """
+    for statement in (item.strip() for item in schema_sql.split(";") if item.strip()):
+        await db.execute(statement)
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_messages_retry ON knowledge_messages(candidate_state, next_attempt_at)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_user_turns_retry ON user_turns(status, next_attempt_at, lease_until)")
+
+
 async def _applied_versions(db) -> set[int]:
     rows = await db.execute_fetchall("SELECT version FROM schema_migrations")
     return {row["version"] for row in rows}
@@ -420,6 +546,14 @@ async def _apply_migrations(db) -> None:
             "INSERT INTO schema_migrations (version, applied_at) VALUES (6, ?)",
             (datetime_to_iso(utc_now()),),
         )
+
+    if 7 not in applied_versions:
+        await _migrate_ai_knowledge(db)
+        await db.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (7, ?)",
+            (datetime_to_iso(utc_now()),),
+        )
+
 
 
 async def run_migrations(database_path: str) -> None:

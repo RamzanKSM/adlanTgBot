@@ -11,6 +11,8 @@ dependencies = [
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.3,<3",
     "qrcode[pil]>=8,<9",
+    "fastembed==0.8.0",
+    "sqlite-vec==0.1.9",
     "uvicorn[standard]>=0.30,<1",
 ]
 

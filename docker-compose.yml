@@ -1,7 +1,9 @@
 services:
   migrate:
     image: adlan-tg-bot:latest
-    build: .
+    build:
+      context: .
+      target: runtime
     env_file:
       - .env
     environment:
@@ -13,7 +15,9 @@ services:
 
   api:
     image: adlan-tg-bot:latest
-    build: .
+    build:
+      context: .
+      target: runtime
     env_file:
       - .env
     environment:
@@ -42,7 +46,9 @@ services:
 
   bot:
     image: adlan-tg-bot:latest
-    build: .
+    build:
+      context: .
+      target: runtime
     env_file:
       - .env
     environment:
@@ -53,4 +59,28 @@ services:
         condition: service_completed_successfully
     volumes:
       - /root/adlanbot/data:/app/data
+    restart: unless-stopped
+
+  ai-worker:
+    image: adlan-tg-bot-ai:latest
+    build:
+      context: .
+      target: ai-worker
+      args:
+        CODEX_CLI_VERSION: "0.155.1"
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/bot.sqlite3
+      AI_EMBEDDING_CACHE_DIR: /app/models/fastembed
+      HOME: /app/codex-home
+      CODEX_HOME: /app/codex-home
+    command: ["python", "-m", "app.ai_worker_main"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - /root/adlanbot/data:/app/data
+      - /root/adlanbot/models:/app/models
+      - /root/adlanbot/codex-home:/app/codex-home
     restart: unless-stopped

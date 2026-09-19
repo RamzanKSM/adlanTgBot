@@ -28,6 +28,19 @@ class Settings(BaseSettings):
 
     scheduler_interval_seconds: int = 60
     pending_payment_check_seconds: int = 300
+    ai_enabled: bool = False
+    ai_turn_debounce_seconds: int = 30
+    ai_recent_context_limit: int = 40
+    ai_retrieval_top_k: int = 10
+    ai_retrieval_context_chars: int = 12_000
+    ai_scheduler_interval_seconds: int = 5
+    ai_worker_executable: str = "codex"
+    ai_worker_timeout_seconds: int = 90
+    ai_session_timeout_seconds: int = 600
+    ai_retry_max_attempts: int = 5
+    ai_retry_base_seconds: int = 30
+    ai_processing_lease_seconds: int = 180
+    ai_embedding_cache_dir: Path = Path("./data/models/fastembed")
 
     @property
     def admin_ids(self) -> list[int]:

@@ -2,6 +2,7 @@ from aiogram import Bot, Dispatcher
 
 from app.bot.event_logging import TelegramEventLoggingMiddleware
 from app.bot.handlers_admin import router as admin_router
+from app.bot.handlers_ai import router as ai_group_messages_router
 from app.bot.handlers_chat_member import router as chat_member_router
 from app.bot.handlers_group_service import router as group_service_router
 from app.bot.handlers_user import router as user_router
@@ -17,6 +18,7 @@ def create_dispatcher(settings: Settings, lava_client: LavaClient) -> Dispatcher
     dp.chat_member.middleware(event_logging_middleware)
     dp.include_router(admin_router)
     dp.include_router(user_router)
+    dp.include_router(ai_group_messages_router)
     dp.include_router(group_service_router)
     dp.include_router(chat_member_router)
     return dp
