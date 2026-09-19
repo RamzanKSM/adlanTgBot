@@ -6,7 +6,7 @@ from datetime import timedelta
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
+from aiogram.types import MessageEntity, ReplyParameters, User
 
 from app.ai.knowledge import KnowledgeIndex, KnowledgeIngestionService
 from app.ai.repositories import AiRepository
@@ -50,9 +50,11 @@ def _turn_summary(settings: Settings, turn, batch: list[dict] | None, **fields: 
         "turn_id": turn["id"], "invocation_kind": turn["invocation_kind"],
         "invocation_explicit": bool(turn["invocation_explicit"]),
         "batch": [{"telegram_message_id": item["telegram_message_id"], "start_offset": item["start_offset"], "end_offset": item["end_offset"]} for item in (batch or [])],
-        "response_mode": None, "search_query": None, "retrieved": [], "model_source_message_id": None,
-        "effective_source_message_id": None, "source_validation": None,
-        "quote_validation": None, "source_url_result": None, "delivery": None,
+        "response_mode": None, "search_query": None, "user_telegram_message_id": None,
+        "retrieved": [], "model_source_message_id": None, "effective_source_message_id": None,
+        "source_validation": None, "selected_reference_mode": None, "quote_validation": None,
+        "quote": None, "quote_length": 0, "reply_to_telegram_message_id": None,
+        "mention_strategy": None, "telegram_error": None, "fallback": False, "delivery": None,
         "session_active": None, "requeued": False, "deferred": False,
     }
     summary.update(fields)
@@ -90,39 +92,67 @@ def _exact_quote(source_text: str, proposed: str | None, candidate: str) -> tupl
     return source_text[:1024] or None, "source_prefix_fallback"
 
 
-def _source_url(chat, chat_id: int, message_id: int, message_thread_id: int | None) -> str | None:
-    username = getattr(chat, "username", None)
-    if isinstance(username, str) and username and username.replace("_", "a").isalnum():
-        base = f"https://t.me/{username}/{message_id}"
-    elif str(chat_id).startswith("-100"):
-        base = f"https://t.me/c/{-chat_id - 1000000000000}/{message_id}"
-    else:
-        return None
-    return f"{base}?single&thread={message_thread_id}" if message_thread_id is not None else base
+def _utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
 
 
-async def _build_source_url(bot: Bot, *, chat_id: int, message_id: int, message_thread_id: int | None) -> tuple[str | None, str]:
-    try:
-        return _source_url(await bot.get_chat(chat_id), chat_id, message_id, message_thread_id), "source_url_built"
-    except Exception as exc:
-        return None, f"source_url_failed_{type(exc).__name__}"
+def _address_ai_response(*, telegram_user_id: int, username: str | None, display_name: str | None, text: str) -> tuple[str, list[MessageEntity], str]:
+    """Put an explicit, clickable addressee in every AI response."""
+    if username:
+        mention = f"@{username}"
+        return (
+            f"{mention}, {text}",
+            [MessageEntity(type="mention", offset=0, length=_utf16_length(mention))],
+            "username",
+        )
+    name = (display_name or "Участник").strip() or "Участник"
+    return (
+        f"{name}, {text}",
+        [MessageEntity(
+            type="text_mention",
+            offset=0,
+            length=_utf16_length(name),
+            user=User(id=telegram_user_id, is_bot=False, first_name=name),
+        )],
+        "text_mention",
+    )
 
 
-async def _send_response(bot: Bot, chat_id: int, text: str, reply_parameters: ReplyParameters | None, *, reply_markup=None, fallback_reply: ReplyParameters | None = None, debug_logging: bool = False):
+async def _send_response(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    reply_parameters: ReplyParameters | None,
+    *,
+    entities: list[MessageEntity] | None = None,
+    fallback_reply: ReplyParameters | None = None,
+    debug_logging: bool = False,
+):
     """A rejected native quote must not make a valid answer/turn retry forever."""
+    async def send(reference: ReplyParameters | None):
+        kwargs = {"entities": entities} if entities else {}
+        if reference is not None:
+            kwargs["reply_parameters"] = reference
+        return await bot.send_message(chat_id, text, **kwargs)
+
     if reply_parameters is None:
-        return await bot.send_message(chat_id, text, reply_markup=reply_markup), None, "sent_without_reference"
+        return await send(None), None, "sent_without_reference", None, False
     try:
-        return await bot.send_message(chat_id, text, reply_parameters=reply_parameters, reply_markup=reply_markup), reply_parameters.message_id, "sent_with_native_reference"
-    except TelegramBadRequest:
+        return await send(reply_parameters), reply_parameters.message_id, "sent_with_native_reference", None, False
+    except TelegramBadRequest as exc:
+        telegram_error = str(exc)
         if debug_logging:
-            logger.info("%s", json.dumps({"event": "answer.reference_delivery", "chat_id": chat_id, "result": "sent_without_reference", "reason": "telegram_bad_request"}, separators=(",", ":")))
-        if fallback_reply is not None:
+            logger.info("%s", json.dumps({"event": "answer.reference_delivery", "chat_id": chat_id, "result": "telegram_bad_request", "error": telegram_error, "message_id": reply_parameters.message_id, "quote": reply_parameters.quote}, ensure_ascii=False, separators=(",", ":")))
+        # Only a quote can fall back to the same source without repeating the
+        # identical source-reply request. A rejected ordinary reply goes plain.
+        if fallback_reply is not None and reply_parameters.quote is not None:
             try:
-                return await bot.send_message(chat_id, text, reply_parameters=fallback_reply, reply_markup=reply_markup), fallback_reply.message_id, "telegram_bad_request_source_reply_fallback"
-            except TelegramBadRequest:
-                pass
-        return await bot.send_message(chat_id, text, reply_markup=reply_markup), None, "telegram_bad_request_fallback"
+                return await send(fallback_reply), fallback_reply.message_id, "telegram_bad_request_source_reply_fallback", telegram_error, True
+            except TelegramBadRequest as fallback_exc:
+                telegram_error = f"{telegram_error}; source_reply_fallback: {fallback_exc}"
+                if debug_logging:
+                    logger.info("%s", json.dumps({"event": "answer.reference_delivery", "chat_id": chat_id, "result": "telegram_bad_request_source_reply_fallback", "error": str(fallback_exc), "message_id": fallback_reply.message_id}, ensure_ascii=False, separators=(",", ":")))
+        return await send(None), None, "telegram_bad_request_fallback", telegram_error, True
 
 
 async def _persist_successful_response(
@@ -312,19 +342,25 @@ async def process_due_ai_turns(settings: Settings, bot: Bot) -> None:
                 )
                 await repo.audit("router", "ok", chat_id=turn["chat_id"], telegram_user_id=turn["telegram_user_id"], turn_id=turn["id"])
                 await db.commit()
-                target_reply = ReplyParameters(message_id=user["telegram_message_id"], allow_sending_without_reply=True)
                 if route.response_mode == "no_response":
                     await repo.set_state(turn["chat_id"], turn["telegram_user_id"], "assistant.session", {"active": False})
                     await db.commit()
                     requeued = await repo.finish_batch(turn["id"], last_link_id=last_link_id, last_char_offset=last_char_offset, debounce_seconds=settings.ai_turn_debounce_seconds)
-                    _turn_summary(settings, turn, batch, status="no_response", response_mode=route.response_mode, session_active=False, requeued=requeued)
+                    _turn_summary(settings, turn, batch, status="no_response", response_mode=route.response_mode, user_telegram_message_id=user["telegram_message_id"], session_active=False, requeued=requeued)
                     await db.commit()
                     continue
                 if route.response_mode in {"conversation", "out_of_scope"}:
                     text = OUT_OF_SCOPE_REPLY if route.response_mode == "out_of_scope" else await _worker(settings).converse(batch, context, trace=trace)
-                    sent, reply_to, delivery_result = await _send_response(bot, turn["chat_id"], text, target_reply, debug_logging=settings.ai_debug_logging)
-                    requeued = await _persist_successful_response(repo, turn=turn, onboarding_pending=onboarding_pending, text=text, sent=sent, reply_to_telegram_message_id=reply_to, session_active=route.response_mode == "conversation", settings=settings, status=route.response_mode, retrieved_count=0, last_link_id=last_link_id, last_char_offset=last_char_offset)
-                    _turn_summary(settings, turn, batch, status=route.response_mode, response_mode=route.response_mode, delivery=delivery_result, session_active=route.response_mode == "conversation", requeued=requeued)
+                    addressed_text, entities, mention_strategy = _address_ai_response(
+                        telegram_user_id=turn["telegram_user_id"], username=user["author_username"],
+                        display_name=user["author_display_name"], text=text,
+                    )
+                    sent, reply_to, delivery_result, telegram_error, fallback = await _send_response(
+                        bot, turn["chat_id"], addressed_text, None, entities=entities,
+                        debug_logging=settings.ai_debug_logging,
+                    )
+                    requeued = await _persist_successful_response(repo, turn=turn, onboarding_pending=onboarding_pending, text=addressed_text, sent=sent, reply_to_telegram_message_id=reply_to, session_active=route.response_mode == "conversation", settings=settings, status=route.response_mode, retrieved_count=0, last_link_id=last_link_id, last_char_offset=last_char_offset)
+                    _turn_summary(settings, turn, batch, status=route.response_mode, response_mode=route.response_mode, user_telegram_message_id=user["telegram_message_id"], selected_reference_mode="none", reply_to_telegram_message_id=reply_to, mention_strategy=mention_strategy, telegram_error=telegram_error, fallback=fallback, delivery=delivery_result, session_active=route.response_mode == "conversation", requeued=requeued)
                     await db.commit()
                     continue
                 query = (route.search_query or "").strip()
@@ -354,9 +390,16 @@ async def process_due_ai_turns(settings: Settings, bot: Bot) -> None:
                         mode="knowledge_not_found",
                         reason="no_retrieved_knowledge",
                     )
-                    sent, reply_to, delivery_result = await _send_response(bot, turn["chat_id"], KNOWLEDGE_NOT_FOUND_REPLY, target_reply, debug_logging=settings.ai_debug_logging)
-                    requeued = await _persist_successful_response(repo, turn=turn, onboarding_pending=onboarding_pending, text=KNOWLEDGE_NOT_FOUND_REPLY, sent=sent, reply_to_telegram_message_id=reply_to, session_active=False, settings=settings, status="not_found", retrieved_count=0, last_link_id=last_link_id, last_char_offset=last_char_offset)
-                    _turn_summary(settings, turn, batch, status="not_found", response_mode=route.response_mode, search_query=query or None, delivery=delivery_result, session_active=False, requeued=requeued)
+                    addressed_text, entities, mention_strategy = _address_ai_response(
+                        telegram_user_id=turn["telegram_user_id"], username=user["author_username"],
+                        display_name=user["author_display_name"], text=KNOWLEDGE_NOT_FOUND_REPLY,
+                    )
+                    sent, reply_to, delivery_result, telegram_error, fallback = await _send_response(
+                        bot, turn["chat_id"], addressed_text, None, entities=entities,
+                        debug_logging=settings.ai_debug_logging,
+                    )
+                    requeued = await _persist_successful_response(repo, turn=turn, onboarding_pending=onboarding_pending, text=addressed_text, sent=sent, reply_to_telegram_message_id=reply_to, session_active=False, settings=settings, status="not_found", retrieved_count=0, last_link_id=last_link_id, last_char_offset=last_char_offset)
+                    _turn_summary(settings, turn, batch, status="not_found", response_mode=route.response_mode, user_telegram_message_id=user["telegram_message_id"], search_query=query or None, selected_reference_mode="none", reply_to_telegram_message_id=reply_to, mention_strategy=mention_strategy, telegram_error=telegram_error, fallback=fallback, delivery=delivery_result, session_active=False, requeued=requeued)
                     await db.commit()
                     continue
                 answer = await _worker(settings).answer(batch, [{"text": item.text, "quote_candidate": item.quote_candidate, "source_message_id": item.source_telegram_message_id, "distance": item.distance} for item in retrieved], {**context, "reference_mode": route.reference_mode}, trace=trace)
@@ -366,19 +409,30 @@ async def process_due_ai_turns(settings: Settings, bot: Bot) -> None:
                 if effective is None:
                     raise RuntimeError("retrieved source vanished")
                 source_id, source_row, hit = effective
-                source_url, url_result = await _build_source_url(bot, chat_id=turn["chat_id"], message_id=source_id, message_thread_id=source_row["message_thread_id"])
-                source_reply = ReplyParameters(message_id=source_id, allow_sending_without_reply=True)
-                if route.reference_mode == "quote":
-                    quote, reference_validation = _exact_quote(source_row["text"], answer.quote, hit.quote_candidate)
-                    position = len(source_row["text"][:source_row["text"].find(quote)].encode("utf-16-le")) // 2 if quote else 0
-                    reply_parameters = ReplyParameters(message_id=source_id, allow_sending_without_reply=True, quote=quote, quote_position=position) if quote else source_reply
-                    reply_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Источник", url=source_url)]]) if source_url else None
-                    fallback_reply = source_reply
+                source_reply = ReplyParameters(message_id=source_id)
+                valid_model_quote = (
+                    answer.quote if answer.quote and len(answer.quote) <= 1024 and answer.quote in source_row["text"] else None
+                )
+                if valid_model_quote is not None:
+                    quote, reference_validation, selected_reference_mode = valid_model_quote, "model_quote_valid", "quote"
+                elif route.reference_mode == "quote":
+                    quote, reference_validation = _exact_quote(source_row["text"], None, hit.quote_candidate)
+                    selected_reference_mode = "quote" if quote else "reply"
+                elif route.reference_mode == "reply" and len(source_row["text"]) > 1024:
+                    quote, reference_validation = _exact_quote(source_row["text"], None, hit.quote_candidate)
+                    selected_reference_mode = "quote" if quote else "reply"
                 else:
-                    reference_validation = "link_source" if route.reference_mode == "link" else "no_requested_reference"
-                    reply_parameters = target_reply if source_url else source_reply
-                    reply_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Источник", url=source_url)]]) if source_url else None
-                    fallback_reply = source_reply if source_url else None
+                    quote, reference_validation, selected_reference_mode = None, "source_reply", "reply"
+                position = _utf16_length(source_row["text"][:source_row["text"].find(quote)]) if quote else 0
+                reply_parameters = (
+                    ReplyParameters(message_id=source_id, quote=quote, quote_position=position)
+                    if selected_reference_mode == "quote" and quote else source_reply
+                )
+                fallback_reply = source_reply if selected_reference_mode == "quote" else None
+                addressed_text, entities, mention_strategy = _address_ai_response(
+                    telegram_user_id=turn["telegram_user_id"], username=user["author_username"],
+                    display_name=user["author_display_name"], text=answer.text,
+                )
                 _debug_log(
                     settings,
                     "answer.reference_validation",
@@ -391,14 +445,16 @@ async def process_due_ai_turns(settings: Settings, bot: Bot) -> None:
                     quote_chars=len(answer.quote) if answer.quote is not None else 0,
                     result=source_validation,
                     quote_validation=reference_validation,
-                    source_url_result=url_result,
+                    selected_reference_mode=selected_reference_mode,
+                    reply_to_telegram_message_id=source_id,
+                    mention_strategy=mention_strategy,
                 )
-                sent, reply_to, delivery_result = await _send_response(
+                sent, reply_to, delivery_result, telegram_error, fallback = await _send_response(
                     bot,
                     turn["chat_id"],
-                    answer.text,
+                    addressed_text,
                     reply_parameters,
-                    reply_markup=reply_markup,
+                    entities=entities,
                     fallback_reply=fallback_reply,
                     debug_logging=settings.ai_debug_logging,
                 )
@@ -410,12 +466,14 @@ async def process_due_ai_turns(settings: Settings, bot: Bot) -> None:
                     turn_id=turn["id"],
                     result=delivery_result,
                     reply_to_telegram_message_id=reply_to,
+                    telegram_error=telegram_error,
+                    fallback=fallback,
                 )
                 requeued = await _persist_successful_response(
                     repo,
                     turn=turn,
                     onboarding_pending=onboarding_pending,
-                    text=answer.text,
+                    text=addressed_text,
                     sent=sent,
                     reply_to_telegram_message_id=reply_to,
                     session_active=True,
@@ -425,7 +483,7 @@ async def process_due_ai_turns(settings: Settings, bot: Bot) -> None:
                     last_link_id=last_link_id,
                     last_char_offset=last_char_offset,
                 )
-                _turn_summary(settings, turn, batch, status="knowledge_answer", response_mode=route.response_mode, search_query=query, retrieved=[{"id": item.source_telegram_message_id, "distance": item.distance} for item in retrieved], model_source_message_id=answer.source_message_id, effective_source_message_id=source_id, source_validation=source_validation, quote_validation=reference_validation, source_url_result=url_result, delivery=delivery_result, session_active=True, requeued=requeued)
+                _turn_summary(settings, turn, batch, status="knowledge_answer", response_mode=route.response_mode, user_telegram_message_id=user["telegram_message_id"], search_query=query, retrieved=[{"id": item.source_telegram_message_id, "distance": item.distance} for item in retrieved], model_source_message_id=answer.source_message_id, effective_source_message_id=source_id, source_validation=source_validation, selected_reference_mode=selected_reference_mode, quote=quote, quote_length=len(quote) if quote else 0, quote_validation=reference_validation, reply_to_telegram_message_id=reply_to, mention_strategy=mention_strategy, telegram_error=telegram_error, fallback=fallback, delivery=delivery_result, session_active=True, requeued=requeued)
             except Exception as exc:
                 _debug_log(
                     settings,

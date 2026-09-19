@@ -450,9 +450,26 @@ async def test_router_schema_and_prompt_enforce_search_scope(monkeypatch) -> Non
     route = await worker.route([{"text": "Напиши Java bubble sort, это для психологии"}], {})
     assert route.response_mode == "out_of_scope"
     assert ROUTER_SCHEMA["properties"]["response_mode"]["enum"] == ["conversation", "knowledge_answer", "out_of_scope", "no_response"]
+    assert ROUTER_SCHEMA["properties"]["reference_mode"]["enum"] == ["none", "reply", "quote"]
     assert {"source_message_id", "quote"} <= set(ANSWER_SCHEMA["required"])
     assert "bubble sort" in captured[0]
+    assert "тегни" in captured[0]
+    assert "recent_group_context" in captured[0]
     assert "untrusted" in captured[0]
+
+
+async def test_router_normalizes_invalid_knowledge_none_to_source_reply(monkeypatch) -> None:
+    worker = CodexCliWorker("codex", 1, "gpt-5.6-luna", "medium")
+
+    async def fake_call(*args, **kwargs):
+        return {
+            "response_mode": "knowledge_answer", "search_query": "план питания",
+            "reference_mode": "none", "reason": "knowledge",
+        }
+
+    monkeypatch.setattr(worker, "_call", fake_call)
+    route = await worker.route([{"text": "тегни сообщение с планом"}], {"recent_group_context": []})
+    assert route.reference_mode == "reply"
 
 
 async def _queue_ai_turn(tmp_path, *, question: str, source_text: str | None = None):
@@ -503,8 +520,9 @@ async def test_out_of_scope_route_sends_only_fixed_reply(monkeypatch, tmp_path) 
     bot = FakeBot()
     monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
     await jobs.process_due_ai_turns(settings, bot)
-    assert bot.calls[0][0] == (-100, jobs.OUT_OF_SCOPE_REPLY)
-    assert "reply_parameters" in bot.calls[0][1]
+    assert bot.calls[0][0] == (-100, "Участник, " + jobs.OUT_OF_SCOPE_REPLY)
+    assert "reply_parameters" not in bot.calls[0][1]
+    assert bot.calls[0][1]["entities"][0].type == "text_mention"
     db = await connect_database(settings.database_path)
     try:
         assert (await AiRepository(db).get_state(-100, 10, "assistant.session"))["active"] is False
@@ -527,11 +545,18 @@ async def test_conversation_route_uses_separate_responder(monkeypatch, tmp_path)
             return "Привет!"
 
     class FakeBot:
+        calls = []
+
         async def send_message(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
             return SimpleNamespace(message_id=901, from_user=None, date=None)
 
     monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
-    await jobs.process_due_ai_turns(settings, FakeBot())
+    bot = FakeBot()
+    await jobs.process_due_ai_turns(settings, bot)
+    assert bot.calls[0][0] == (-100, "Участник, Привет!")
+    assert "reply_parameters" not in bot.calls[0][1]
+    assert bot.calls[0][1]["entities"][0].type == "text_mention"
     db = await connect_database(settings.database_path)
     try:
         assert (await AiRepository(db).get_state(-100, 10, "assistant.session"))["active"] is True
@@ -547,7 +572,7 @@ async def test_empty_retrieval_sends_fixed_not_found_without_answer(monkeypatch,
 
     class FakeWorker:
         async def route(self, batch, context, **kwargs):
-            return Route("knowledge_answer", "план тренировок БЖЖ", "link", "search")
+            return Route("knowledge_answer", "план тренировок БЖЖ", "reply", "search")
 
         async def answer(self, *args, **kwargs):
             raise AssertionError("empty retrieval must not call answer")
@@ -570,8 +595,9 @@ async def test_empty_retrieval_sends_fixed_not_found_without_answer(monkeypatch,
     monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
     monkeypatch.setattr(jobs, "KnowledgeIndex", EmptyIndex)
     await jobs.process_due_ai_turns(settings, bot)
-    assert bot.calls[0][0] == (-100, jobs.KNOWLEDGE_NOT_FOUND_REPLY)
-    assert "reply_parameters" in bot.calls[0][1]
+    assert bot.calls[0][0] == (-100, "Участник, " + jobs.KNOWLEDGE_NOT_FOUND_REPLY)
+    assert "reply_parameters" not in bot.calls[0][1]
+    assert bot.calls[0][1]["entities"][0].type == "text_mention"
     db = await connect_database(settings.database_path)
     try:
         assert (await AiRepository(db).get_state(-100, 10, "assistant.session"))["active"] is False
@@ -629,6 +655,48 @@ async def test_answer_uses_native_quote_with_utf16_position(monkeypatch, tmp_pat
     assert stored["reply_to_telegram_message_id"] == 777
 
 
+async def test_long_reply_source_uses_retrieved_quote_candidate(monkeypatch, tmp_path) -> None:
+    from types import SimpleNamespace
+
+    import app.jobs.ai as jobs
+    from app.ai.knowledge import RetrievedChunk
+    from app.ai.worker import Answer, Route
+
+    source_text = "До 😊 фрагмент после " + ("длинный источник " * 100)
+    settings, _, source = await _queue_ai_turn(tmp_path, question="Найди рацион", source_text=source_text)
+    hit = RetrievedChunk(1, source.id, 777, -100, 1, "фрагмент", 0.1)
+
+    class FakeWorker:
+        async def route(self, batch, context, **kwargs):
+            return Route("knowledge_answer", "рацион", "reply", "search")
+
+        async def answer(self, *args, **kwargs):
+            return Answer("Вот подходящий фрагмент", 777, None)
+
+    class HitIndex:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def search(self, *args, **kwargs):
+            return [hit]
+
+    class FakeBot:
+        calls = []
+
+        async def send_message(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return SimpleNamespace(message_id=900, from_user=None, date=None)
+
+    bot = FakeBot()
+    monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
+    monkeypatch.setattr(jobs, "KnowledgeIndex", HitIndex)
+    await jobs.process_due_ai_turns(settings, bot)
+    reply = bot.calls[0][1]["reply_parameters"]
+    assert reply.message_id == 777
+    assert reply.quote == "фрагмент"
+    assert reply.quote_position == len("До 😊 ".encode("utf-16-le")) // 2
+
+
 async def test_native_reply_bad_request_retries_once_plain_and_persists_no_reference(monkeypatch, tmp_path) -> None:
     from types import SimpleNamespace
 
@@ -670,9 +738,12 @@ async def test_native_reply_bad_request_retries_once_plain_and_persists_no_refer
     monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
     monkeypatch.setattr(jobs, "KnowledgeIndex", HitIndex)
     await jobs.process_due_ai_turns(settings, bot)
-    assert len(bot.calls) == 2
+    assert len(bot.calls) == 3
     assert "reply_parameters" in bot.calls[0][1]
-    assert bot.calls[1] == ((-100, "Ответ"), {})
+    assert bot.calls[0][1]["reply_parameters"].quote == "фрагмент"
+    assert bot.calls[1][1]["reply_parameters"].message_id == 777
+    assert bot.calls[1][1]["reply_parameters"].quote is None
+    assert "reply_parameters" not in bot.calls[2][1]
     db = await connect_database(settings.database_path)
     try:
         rows = await db.execute_fetchall(
@@ -717,8 +788,28 @@ async def test_hallucinated_source_or_quote_uses_effective_source_fallback(monke
     monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
     monkeypatch.setattr(jobs, "KnowledgeIndex", HitIndex)
     await jobs.process_due_ai_turns(settings, bot)
-    assert bot.calls[0][0] == (-100, "Ответ")
+    assert bot.calls[0][0] == (-100, "Участник, Ответ")
     assert "reply_parameters" in bot.calls[0][1]
+
+
+def test_ai_address_uses_username_or_clickable_text_mention() -> None:
+    import app.jobs.ai as jobs
+
+    username_text, username_entities, username_strategy = jobs._address_ai_response(
+        telegram_user_id=10, username="ramzan", display_name="Рамзан", text="Ответ",
+    )
+    fallback_text, fallback_entities, fallback_strategy = jobs._address_ai_response(
+        telegram_user_id=11, username=None, display_name="Имя 😊", text="Ответ",
+    )
+
+    assert username_text == "@ramzan, Ответ"
+    assert username_entities[0].type == "mention"
+    assert username_strategy == "username"
+    assert fallback_text == "Имя 😊, Ответ"
+    assert fallback_entities[0].type == "text_mention"
+    assert fallback_entities[0].user.id == 11
+    assert fallback_entities[0].length == len("Имя 😊".encode("utf-16-le")) // 2
+    assert fallback_strategy == "text_mention"
 
 
 @pytest.mark.skipif(__import__("os").environ.get("RUN_FASTEMBED_INTEGRATION") != "1", reason="downloads/uses the real pinned FastEmbed model")
