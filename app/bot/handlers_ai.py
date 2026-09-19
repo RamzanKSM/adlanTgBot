@@ -23,8 +23,15 @@ def _message_text(message: Message) -> tuple[str, str] | None:
     return None
 
 
-def _is_configured_admin(message: Message, settings: Settings) -> bool:
-    # Knowledge permissions intentionally use immutable numeric IDs only.
+def _is_knowledge_candidate(message: Message, settings: Settings) -> bool:
+    """Apply the source policy before the neural educational classifier.
+
+    Telegram represents anonymous admin/channel/automatic-forward posts through
+    ``sender_chat``. Its presence is sufficient in the configured group;
+    ordinary human messages require an immutable numeric administrator id.
+    """
+    if message.sender_chat is not None:
+        return True
     return message.from_user is not None and message.from_user.id in settings.admin_ids
 
 
@@ -74,14 +81,19 @@ async def _persist(message: Message, settings: Settings, bot: Bot, *, edited: bo
             created_at=message.date,
             edited_at=message.edit_date if edited else None,
         )
-        if edited and stored.changed:
-            await repo.invalidate_knowledge(stored.id)
-            await repo.audit("save", "edited", chat_id=message.chat.id, telegram_user_id=telegram_user_id, message_row_id=stored.id)
-        elif stored.changed:
-            await repo.audit("save", "ok", chat_id=message.chat.id, telegram_user_id=telegram_user_id, message_row_id=stored.id)
-        if stored.changed and _is_configured_admin(message, settings):
-            await repo.make_knowledge_candidate(stored.id)
-            await repo.audit("classify", "pending", chat_id=message.chat.id, telegram_user_id=telegram_user_id, message_row_id=stored.id)
+        if stored.changed:
+            if edited:
+                # An edit invalidates any prior classification and chunks.
+                # Re-create the candidate below even if the message was not a
+                # candidate yet (for example, during a rolling deployment).
+                await repo.invalidate_knowledge(stored.id)
+                await repo.audit("save", "edited", chat_id=message.chat.id, telegram_user_id=telegram_user_id, message_row_id=stored.id)
+            else:
+                await repo.audit("save", "ok", chat_id=message.chat.id, telegram_user_id=telegram_user_id, message_row_id=stored.id)
+
+            if _is_knowledge_candidate(message, settings):
+                await repo.make_knowledge_candidate(stored.id)
+                await repo.audit("classify", "pending", chat_id=message.chat.id, telegram_user_id=telegram_user_id, message_row_id=stored.id)
         onboarding_pending = telegram_user_id is not None and (
             await repo.get_state(message.chat.id, telegram_user_id, "onboarding.awaiting") is not None
             and await repo.get_state(message.chat.id, telegram_user_id, "onboarding.completed") is None

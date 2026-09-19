@@ -6,7 +6,7 @@ import pytest
 
 from app.ai.chunking import RecursiveChunker, utf16_offset
 from app.ai.repositories import AiRepository
-from app.bot.handlers_ai import _is_bot_invocation
+from app.bot.handlers_ai import _is_bot_invocation, _persist
 from app.bot.handlers_chat_member import onboarding_greeting
 from app.ai.worker import CodexCliWorker, CLASSIFY_SCHEMA
 from app.db.connection import connect_database
@@ -64,7 +64,7 @@ def test_real_offset_tokenizer_is_untruncated_and_chunks_cover_russian_emoji(tmp
     assert len(chunks) > 5
 
 
-async def test_admin_candidate_and_edit_invalidation_are_durable(tmp_path) -> None:
+async def test_candidate_and_edit_invalidation_are_durable(tmp_path) -> None:
     db, repo = await _repo(tmp_path)
     try:
         stored = await repo.store_message(chat_id=-100, telegram_message_id=10, sender_telegram_user_id=1, sender_chat_id=None,
@@ -80,6 +80,115 @@ async def test_admin_candidate_and_edit_invalidation_are_durable(tmp_path) -> No
         await db.close()
     assert candidate["candidate_state"] == "pending"
     assert chunks == []
+
+
+async def test_candidate_policy_accepts_admins_and_any_sender_chat_but_not_ordinary_members(tmp_path) -> None:
+    """Anonymous/channel posts use sender_chat; humans require ADMIN_IDS."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from app.config import Settings
+
+    database_path = tmp_path / "ai.sqlite3"
+    await run_migrations(str(database_path))
+    settings = Settings(bot_token="test", telegram_group_id=-100, database_path=database_path, ai_enabled=True, admin_ids_raw="1")
+    now = datetime.now(UTC)
+
+    def incoming(
+        message_id: int,
+        *,
+        text: str | None = None,
+        caption: str | None = None,
+        user_id: int | None = None,
+        sender_chat_id: int | None = None,
+        forward_origin=None,
+    ):
+        user = SimpleNamespace(id=user_id, username="member", first_name="Member", last_name=None) if user_id is not None else None
+        return SimpleNamespace(
+            chat=SimpleNamespace(id=-100), message_id=message_id, text=text, caption=caption,
+            from_user=user,
+            sender_chat=SimpleNamespace(id=sender_chat_id) if sender_chat_id is not None else None,
+            forward_origin=forward_origin, reply_to_message=None, message_thread_id=None,
+            date=now, edit_date=None, entities=None, caption_entities=None,
+        )
+
+    # A non-admin human (even a manual forward) is not a candidate. An admin,
+    # a self sender_chat post, and an automatic foreign forward are candidates.
+    await _persist(incoming(1, text="обычный участник", user_id=42), settings, SimpleNamespace(id=7), edited=False)
+    await _persist(incoming(2, text="администратор", user_id=1), settings, SimpleNamespace(id=7), edited=False)
+    await _persist(incoming(3, caption="от имени этой группы", sender_chat_id=-100), settings, SimpleNamespace(id=7), edited=False)
+    await _persist(
+        incoming(4, caption="автоматический форвард", sender_chat_id=-777, forward_origin=SimpleNamespace(type="channel")),
+        settings,
+        SimpleNamespace(id=7),
+        edited=False,
+    )
+
+    db = await connect_database(database_path)
+    try:
+        rows = await db.execute_fetchall(
+            """SELECT tm.telegram_message_id, tm.sender_telegram_user_id, tm.sender_chat_id,
+                      tm.message_kind, km.candidate_state
+                 FROM telegram_messages tm LEFT JOIN knowledge_messages km ON km.telegram_message_row_id = tm.id
+                 ORDER BY tm.telegram_message_id"""
+        )
+    finally:
+        await db.close()
+    assert [(row["telegram_message_id"], row["sender_telegram_user_id"], row["sender_chat_id"], row["message_kind"], row["candidate_state"]) for row in rows] == [
+        (1, 42, None, "text", None),
+        (2, 1, None, "text", "pending"),
+        (3, None, -100, "caption", "pending"),
+        (4, None, -777, "caption", "pending"),
+    ]
+
+
+async def test_edited_message_recreates_candidate_after_invalidating_existing_chunks(tmp_path) -> None:
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from app.config import Settings
+
+    database_path = tmp_path / "ai.sqlite3"
+    await run_migrations(str(database_path))
+    settings = Settings(bot_token="test", telegram_group_id=-100, database_path=database_path, ai_enabled=True, admin_ids_raw="42")
+    now = datetime.now(UTC)
+    user = SimpleNamespace(id=42, username="member", first_name="Member", last_name=None)
+    original = SimpleNamespace(
+        chat=SimpleNamespace(id=-100), message_id=5, text="старый текст", caption=None, from_user=user,
+        sender_chat=None, reply_to_message=None, message_thread_id=None, date=now, edit_date=None,
+        entities=None, caption_entities=None,
+    )
+    await _persist(original, settings, SimpleNamespace(id=7), edited=False)
+
+    db = await connect_database(database_path)
+    try:
+        repo = AiRepository(db)
+        stored = await (await db.execute("SELECT id FROM telegram_messages WHERE chat_id = -100 AND telegram_message_id = 5")).fetchone()
+        await repo.set_candidate_result(stored["id"], state="include", reason="test", profile="test")
+        await repo.replace_chunks(stored["id"], [{"start_char": 0, "end_char": 11, "start_utf16": 0, "end_utf16": 11,
+            "embedding_text": "старый текст", "token_count": 2, "profile": "test"}])
+        await db.commit()
+    finally:
+        await db.close()
+
+    edited = SimpleNamespace(
+        chat=SimpleNamespace(id=-100), message_id=5, text="новый текст", caption=None, from_user=user,
+        sender_chat=None, reply_to_message=None, message_thread_id=None, date=now, edit_date=now,
+        entities=None, caption_entities=None,
+    )
+    await _persist(edited, settings, SimpleNamespace(id=7), edited=True)
+
+    db = await connect_database(database_path)
+    try:
+        row = await (await db.execute(
+            """SELECT tm.text, km.candidate_state, COUNT(kc.id) AS chunk_count
+                 FROM telegram_messages tm JOIN knowledge_messages km ON km.telegram_message_row_id = tm.id
+                 LEFT JOIN knowledge_chunks kc ON kc.telegram_message_row_id = tm.id
+                 WHERE tm.chat_id = -100 AND tm.telegram_message_id = 5 GROUP BY tm.id"""
+        )).fetchone()
+    finally:
+        await db.close()
+    assert (row["text"], row["candidate_state"], row["chunk_count"]) == ("новый текст", "pending", 0)
 
 
 async def test_debounce_is_per_user_and_claim_is_durable(tmp_path) -> None:
