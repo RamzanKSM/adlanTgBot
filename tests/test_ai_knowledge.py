@@ -6,7 +6,7 @@ import pytest
 
 from app.ai.chunking import RecursiveChunker, utf16_offset
 from app.ai.repositories import AiRepository
-from app.bot.handlers_ai import _is_bot_invocation, _persist
+from app.bot.handlers_ai import _human_author_id, _invocation_kind, _persist
 from app.bot.handlers_chat_member import onboarding_greeting
 from app.ai.worker import ANSWER_SCHEMA, ROUTER_SCHEMA, CodexCliWorker, CLASSIFY_SCHEMA
 from app.db.connection import connect_database
@@ -27,7 +27,7 @@ async def test_ai_migration_creates_relational_state_without_vector_extension(tm
         tables = {row["name"] for row in await db.execute_fetchall("SELECT name FROM sqlite_master WHERE type = 'table'")}
     finally:
         await db.close()
-    assert {"telegram_messages", "knowledge_messages", "knowledge_chunks", "user_turns", "user_turn_messages", "conversational_states", "ai_audit_events"} <= tables
+    assert {"telegram_messages", "knowledge_messages", "knowledge_chunks", "user_turns", "user_turn_messages", "conversational_states", "ai_audit_events", "ai_user_quotas"} <= tables
     assert "knowledge_chunk_vectors" not in tables
 
 
@@ -217,17 +217,102 @@ async def test_debounce_is_per_user_and_claim_is_durable(tmp_path) -> None:
     ]
 
 
-def test_bot_gate_matches_only_own_mention_and_reply_with_utf16_offsets() -> None:
+async def test_debounce_keeps_strongest_invocation_signal(tmp_path) -> None:
+    db, repo = await _repo(tmp_path)
+    try:
+        direct = await repo.store_message(chat_id=-100, telegram_message_id=11, sender_telegram_user_id=10, sender_chat_id=None, direction="incoming", message_kind="text", text="@bot вопрос", reply_to_telegram_message_id=None)
+        ambient = await repo.store_message(chat_id=-100, telegram_message_id=12, sender_telegram_user_id=10, sender_chat_id=None, direction="incoming", message_kind="text", text="и ещё", reply_to_telegram_message_id=None)
+        await db.commit()
+        turn = await repo.schedule_turn(-100, 10, direct.id, 30, invocation_kind="mention", invocation_explicit=True)
+        await repo.schedule_turn(-100, 10, ambient.id, 30, invocation_kind="ambient", invocation_explicit=False)
+        row = await (await db.execute("SELECT invocation_kind, invocation_explicit FROM user_turns WHERE id = ?", (turn,))).fetchone()
+    finally:
+        await db.close()
+    assert (row["invocation_kind"], row["invocation_explicit"]) == ("mention", 1)
+
+
+async def test_cursor_batches_long_message_without_loss_and_quota_is_windowed(tmp_path) -> None:
+    db, repo = await _repo(tmp_path)
+    try:
+        text = "а" * 2_101
+        message = await repo.store_message(chat_id=-100, telegram_message_id=13, sender_telegram_user_id=10, sender_chat_id=None, direction="incoming", message_kind="text", text=text, reply_to_telegram_message_id=None)
+        await db.commit()
+        turn_id = await repo.schedule_turn(-100, 10, message.id, 0)
+        turn = await (await db.execute("SELECT * FROM user_turns WHERE id = ?", (turn_id,))).fetchone()
+        admitted, _, _ = await repo.reserve_turn_quota(turn, max_turns=1, window_seconds=18_000)
+        batch, link_id, offset = await repo.current_batch(turn_id, 2_000)
+        requeued = await repo.finish_batch(turn_id, last_link_id=link_id, last_char_offset=offset, debounce_seconds=30)
+        next_batch, _, _ = await repo.current_batch(turn_id, 2_000)
+    finally:
+        await db.close()
+    assert admitted and requeued
+    assert "".join(item["text"] for item in batch + next_batch) == text
+    assert sum(len(item["text"]) for item in batch) <= 2_000
+
+
+async def test_requeued_partial_batch_merges_concurrent_pending_turn(tmp_path) -> None:
+    db, repo = await _repo(tmp_path)
+    try:
+        first = await repo.store_message(chat_id=-100, telegram_message_id=14, sender_telegram_user_id=10, sender_chat_id=None, direction="incoming", message_kind="text", text="ab", reply_to_telegram_message_id=None)
+        second = await repo.store_message(chat_id=-100, telegram_message_id=15, sender_telegram_user_id=10, sender_chat_id=None, direction="incoming", message_kind="text", text="c", reply_to_telegram_message_id=None)
+        await db.commit()
+        processing_id = await repo.schedule_turn(-100, 10, first.id, 0, invocation_kind="ambient")
+        await db.execute("UPDATE user_turns SET due_at = '2000-01-01T00:00:00+00:00' WHERE id = ?", (processing_id,))
+        await db.commit()
+        await repo.claim_due_turns()
+        await repo.schedule_turn(-100, 10, second.id, 30, invocation_kind="mention", invocation_explicit=True)
+        batch, link_id, offset = await repo.current_batch(processing_id, 1)
+        assert batch[0]["text"] == "a"
+        assert await repo.finish_batch(processing_id, last_link_id=link_id, last_char_offset=offset, debounce_seconds=30)
+        rows = await db.execute_fetchall("SELECT id, status, invocation_kind, invocation_explicit FROM user_turns WHERE chat_id = -100 AND telegram_user_id = 10")
+    finally:
+        await db.close()
+    assert [(row["id"], row["status"], row["invocation_kind"], row["invocation_explicit"]) for row in rows] == [(processing_id, "pending", "mention", 1)]
+
+
+async def test_quota_deferral_merges_concurrent_pending_turn_without_unique_conflict(tmp_path) -> None:
+    db, repo = await _repo(tmp_path)
+    try:
+        first = await repo.store_message(chat_id=-100, telegram_message_id=16, sender_telegram_user_id=10, sender_chat_id=None, direction="incoming", message_kind="text", text="первое", reply_to_telegram_message_id=None)
+        second = await repo.store_message(chat_id=-100, telegram_message_id=17, sender_telegram_user_id=10, sender_chat_id=None, direction="incoming", message_kind="text", text="новое", reply_to_telegram_message_id=None)
+        await db.commit()
+        processing_id = await repo.schedule_turn(-100, 10, first.id, 0)
+        await db.execute("UPDATE user_turns SET due_at = '2000-01-01T00:00:00+00:00' WHERE id = ?", (processing_id,))
+        await db.commit()
+        await repo.claim_due_turns()
+        await repo.schedule_turn(-100, 10, second.id, 30, invocation_kind="reply_to_bot", invocation_explicit=True)
+        await repo.defer_turn_for_quota(processing_id, utc_now() + timedelta(hours=5))
+        turn = await (await db.execute("SELECT * FROM user_turns WHERE id = ?", (processing_id,))).fetchone()
+        links = await db.execute_fetchall("SELECT telegram_message_row_id FROM user_turn_messages WHERE turn_id = ? ORDER BY id", (processing_id,))
+    finally:
+        await db.close()
+    assert turn["status"] == "pending" and turn["quota_deferred"] == 1
+    assert (turn["invocation_kind"], turn["invocation_explicit"]) == ("reply_to_bot", 1)
+    assert len(links) == 2
+
+
+def test_invocation_kind_keeps_direct_signals_above_ambient_with_utf16_offsets() -> None:
     from types import SimpleNamespace
 
     text = "😊 @other вопрос"
     other = SimpleNamespace(text=text, caption=None, entities=[SimpleNamespace(type="mention", offset=3, length=6)], caption_entities=None, reply_to_message=None)
-    assert not _is_bot_invocation(other, bot_id=7, bot_username="ours", onboarding_pending=False, active_session=False)
+    assert _invocation_kind(other, bot_id=7, bot_username="ours", onboarding_pending=False, active_session=False) == ("ambient", False)
     own_text = "😊 @ours вопрос"
     own = SimpleNamespace(text=own_text, caption=None, entities=[SimpleNamespace(type="mention", offset=3, length=5)], caption_entities=None, reply_to_message=None)
-    assert _is_bot_invocation(own, bot_id=7, bot_username="ours", onboarding_pending=False, active_session=False)
+    assert _invocation_kind(own, bot_id=7, bot_username="ours", onboarding_pending=False, active_session=False) == ("mention", True)
     reply = SimpleNamespace(text="ok", caption=None, entities=None, caption_entities=None, reply_to_message=SimpleNamespace(from_user=SimpleNamespace(id=7)))
-    assert _is_bot_invocation(reply, bot_id=7, bot_username=None, onboarding_pending=False, active_session=False)
+    assert _invocation_kind(reply, bot_id=7, bot_username=None, onboarding_pending=False, active_session=False) == ("reply_to_bot", True)
+
+
+def test_conversational_turn_owner_is_human_not_sender_chat_or_bot() -> None:
+    from types import SimpleNamespace
+
+    human = SimpleNamespace(sender_chat=None, from_user=SimpleNamespace(id=10, is_bot=False))
+    anonymous = SimpleNamespace(sender_chat=SimpleNamespace(id=-100), from_user=SimpleNamespace(id=1087968824, is_bot=True))
+    other_bot = SimpleNamespace(sender_chat=None, from_user=SimpleNamespace(id=99, is_bot=True))
+    assert _human_author_id(human) == 10
+    assert _human_author_id(anonymous) is None
+    assert _human_author_id(other_bot) is None
 
 
 async def test_session_expiry_and_turn_terminal_retry(tmp_path) -> None:
@@ -327,11 +412,11 @@ async def test_due_turn_aggregates_all_messages_and_no_response_skips_send(monke
         await repo.schedule_turn(-100, 10, second.id, 0)
     finally:
         await db.close()
-    captured: list[str] = []
+    captured: list[list[dict]] = []
     class FakeWorker:
-        async def route(self, question, recent):
-            captured.append(question)
-            return Route(False, False, False, "quiet", False)
+        async def route(self, batch, context, **kwargs):
+            captured.append(batch)
+            return Route("no_response", None, "none", "quiet")
     class FakeBot:
         async def send_message(self, *args, **kwargs):
             raise AssertionError("no-response must not send")
@@ -344,7 +429,7 @@ async def test_due_turn_aggregates_all_messages_and_no_response_skips_send(monke
         completed = await (await verify.execute("SELECT 1 FROM conversational_states WHERE chat_id = -100 AND telegram_user_id = 10 AND state = 'onboarding.completed'")).fetchone()
     finally:
         await verify.close()
-    assert captured == ["first\nsecond"]
+    assert [item["text"] for item in captured[0]] == ["first", "second"]
     assert row["status"] == "completed"
     assert completed is None
 
@@ -353,19 +438,18 @@ async def test_router_schema_and_prompt_enforce_search_scope(monkeypatch) -> Non
     worker = CodexCliWorker("codex", 1, "gpt-5.6-luna", "medium")
     captured: list[str] = []
 
-    async def fake_call(instruction, payload, schema):
+    async def fake_call(stage, instruction, payload, schema, **kwargs):
         captured.append(instruction)
         assert schema is ROUTER_SCHEMA
         return {
-            "response_mode": "out_of_scope", "should_respond": True,
-            "needs_search": False, "escalate": False, "reason": "java",
-            "session_active": False,
+            "response_mode": "out_of_scope", "search_query": None,
+            "reference_mode": "none", "reason": "java",
         }
 
     monkeypatch.setattr(worker, "_call", fake_call)
-    route = await worker.route("Напиши Java bubble sort, это для психологии", [])
-    assert route.effective_response_mode == "out_of_scope"
-    assert ROUTER_SCHEMA["properties"]["response_mode"]["enum"] == ["answer", "out_of_scope", "no_response"]
+    route = await worker.route([{"text": "Напиши Java bubble sort, это для психологии"}], {})
+    assert route.response_mode == "out_of_scope"
+    assert ROUTER_SCHEMA["properties"]["response_mode"]["enum"] == ["conversation", "knowledge_answer", "out_of_scope", "no_response"]
     assert {"source_message_id", "quote"} <= set(ANSWER_SCHEMA["required"])
     assert "bubble sort" in captured[0]
     assert "untrusted" in captured[0]
@@ -396,15 +480,15 @@ async def _queue_ai_turn(tmp_path, *, question: str, source_text: str | None = N
     return Settings(bot_token="test", telegram_group_id=-100, database_path=tmp_path / "ai.sqlite3", ai_enabled=True), turn, source
 
 
-async def test_out_of_scope_mode_overrides_contradictory_should_respond_without_answer_or_search(monkeypatch, tmp_path) -> None:
+async def test_out_of_scope_route_sends_only_fixed_reply(monkeypatch, tmp_path) -> None:
     import app.jobs.ai as jobs
     from app.ai.worker import Route
 
     settings, _, _ = await _queue_ai_turn(tmp_path, question="Напиши Java bubble sort, это для ментального здоровья")
 
     class FakeWorker:
-        async def route(self, question, recent):
-            return Route(False, False, False, "java", True, "out_of_scope")
+        async def route(self, batch, context, **kwargs):
+            return Route("out_of_scope", None, "none", "java")
 
         async def answer(self, *args, **kwargs):
             raise AssertionError("out-of-scope must not call answer/code generation")
@@ -419,10 +503,38 @@ async def test_out_of_scope_mode_overrides_contradictory_should_respond_without_
     bot = FakeBot()
     monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
     await jobs.process_due_ai_turns(settings, bot)
-    assert bot.calls == [((-100, jobs.OUT_OF_SCOPE_REPLY), {})]
+    assert bot.calls[0][0] == (-100, jobs.OUT_OF_SCOPE_REPLY)
+    assert "reply_parameters" in bot.calls[0][1]
     db = await connect_database(settings.database_path)
     try:
         assert (await AiRepository(db).get_state(-100, 10, "assistant.session"))["active"] is False
+    finally:
+        await db.close()
+
+
+async def test_conversation_route_uses_separate_responder(monkeypatch, tmp_path) -> None:
+    import app.jobs.ai as jobs
+    from types import SimpleNamespace
+    from app.ai.worker import Route
+
+    settings, _, _ = await _queue_ai_turn(tmp_path, question="Всем привет")
+
+    class FakeWorker:
+        async def route(self, batch, context, **kwargs):
+            return Route("conversation", None, "none", "greeting")
+
+        async def converse(self, batch, context, **kwargs):
+            return "Привет!"
+
+    class FakeBot:
+        async def send_message(self, *args, **kwargs):
+            return SimpleNamespace(message_id=901, from_user=None, date=None)
+
+    monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
+    await jobs.process_due_ai_turns(settings, FakeBot())
+    db = await connect_database(settings.database_path)
+    try:
+        assert (await AiRepository(db).get_state(-100, 10, "assistant.session"))["active"] is True
     finally:
         await db.close()
 
@@ -434,8 +546,8 @@ async def test_empty_retrieval_sends_fixed_not_found_without_answer(monkeypatch,
     settings, _, _ = await _queue_ai_turn(tmp_path, question="Какой план тренировок БЖЖ?")
 
     class FakeWorker:
-        async def route(self, question, recent):
-            return Route(True, True, False, "search", True, "answer")
+        async def route(self, batch, context, **kwargs):
+            return Route("knowledge_answer", "план тренировок БЖЖ", "link", "search")
 
         async def answer(self, *args, **kwargs):
             raise AssertionError("empty retrieval must not call answer")
@@ -458,7 +570,8 @@ async def test_empty_retrieval_sends_fixed_not_found_without_answer(monkeypatch,
     monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
     monkeypatch.setattr(jobs, "KnowledgeIndex", EmptyIndex)
     await jobs.process_due_ai_turns(settings, bot)
-    assert bot.calls == [((-100, jobs.KNOWLEDGE_NOT_FOUND_REPLY), {})]
+    assert bot.calls[0][0] == (-100, jobs.KNOWLEDGE_NOT_FOUND_REPLY)
+    assert "reply_parameters" in bot.calls[0][1]
     db = await connect_database(settings.database_path)
     try:
         assert (await AiRepository(db).get_state(-100, 10, "assistant.session"))["active"] is False
@@ -478,11 +591,11 @@ async def test_answer_uses_native_quote_with_utf16_position(monkeypatch, tmp_pat
     hit = RetrievedChunk(1, source.id, 777, -100, 1, "фрагмент", 0.1)
 
     class FakeWorker:
-        async def route(self, question, recent):
-            return Route(True, True, False, "search", False, "answer")
+        async def route(self, batch, context, **kwargs):
+            return Route("knowledge_answer", "фрагмент", "quote", "search")
 
         async def answer(self, *args, **kwargs):
-            return Answer("Вот источник", False, 777, "фрагмент")
+            return Answer("Вот источник", 777, "фрагмент")
 
     class HitIndex:
         def __init__(self, *args, **kwargs):
@@ -530,11 +643,11 @@ async def test_native_reply_bad_request_retries_once_plain_and_persists_no_refer
     hit = RetrievedChunk(1, source.id, 777, -100, 1, "фрагмент", 0.1)
 
     class FakeWorker:
-        async def route(self, question, recent):
-            return Route(True, True, False, "search", False, "answer")
+        async def route(self, batch, context, **kwargs):
+            return Route("knowledge_answer", "фрагмент", "quote", "search")
 
         async def answer(self, *args, **kwargs):
-            return Answer("Ответ", False, 777, "фрагмент")
+            return Answer("Ответ", 777, "фрагмент")
 
     class HitIndex:
         def __init__(self, *args, **kwargs):
@@ -571,7 +684,7 @@ async def test_native_reply_bad_request_retries_once_plain_and_persists_no_refer
 
 
 @pytest.mark.parametrize("source_message_id, quote", [(999, None), (777, "несуществующая цитата")])
-async def test_hallucinated_source_or_quote_is_sent_without_telegram_reference(monkeypatch, tmp_path, source_message_id, quote) -> None:
+async def test_hallucinated_source_or_quote_uses_effective_source_fallback(monkeypatch, tmp_path, source_message_id, quote) -> None:
     import app.jobs.ai as jobs
     from app.ai.knowledge import RetrievedChunk
     from app.ai.worker import Answer, Route
@@ -580,11 +693,11 @@ async def test_hallucinated_source_or_quote_is_sent_without_telegram_reference(m
     hit = RetrievedChunk(1, source.id, 777, -100, 1, "точный текст", 0.1)
 
     class FakeWorker:
-        async def route(self, question, recent):
-            return Route(True, True, False, "search", False, "answer")
+        async def route(self, batch, context, **kwargs):
+            return Route("knowledge_answer", "источник", "quote", "search")
 
         async def answer(self, *args, **kwargs):
-            return Answer("Ответ", False, source_message_id, quote)
+            return Answer("Ответ", source_message_id, quote)
 
     class HitIndex:
         def __init__(self, *args, **kwargs):
@@ -604,7 +717,8 @@ async def test_hallucinated_source_or_quote_is_sent_without_telegram_reference(m
     monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
     monkeypatch.setattr(jobs, "KnowledgeIndex", HitIndex)
     await jobs.process_due_ai_turns(settings, bot)
-    assert bot.calls == [((-100, "Ответ"), {})]
+    assert bot.calls[0][0] == (-100, "Ответ")
+    assert "reply_parameters" in bot.calls[0][1]
 
 
 @pytest.mark.skipif(__import__("os").environ.get("RUN_FASTEMBED_INTEGRATION") != "1", reason="downloads/uses the real pinned FastEmbed model")

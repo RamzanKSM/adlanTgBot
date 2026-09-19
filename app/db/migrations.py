@@ -496,6 +496,37 @@ async def _migrate_ai_knowledge(db) -> None:
     await db.execute("CREATE INDEX IF NOT EXISTS idx_user_turns_retry ON user_turns(status, next_attempt_at, lease_until)")
 
 
+async def _migrate_ai_turn_quota_and_cursor(db) -> None:
+    """Keep admission and partial-batch progress durable across worker restarts."""
+    await _ensure_columns(
+        db,
+        "user_turns",
+        {
+            "invocation_kind": "TEXT NOT NULL DEFAULT 'ambient'",
+            "invocation_explicit": "INTEGER NOT NULL DEFAULT 0",
+            "cursor_message_link_id": "INTEGER",
+            "cursor_char_offset": "INTEGER NOT NULL DEFAULT 0",
+            "quota_reserved": "INTEGER NOT NULL DEFAULT 0",
+        },
+    )
+    await db.execute(
+        """CREATE TABLE IF NOT EXISTS ai_user_quotas (
+            chat_id INTEGER NOT NULL,
+            telegram_user_id INTEGER NOT NULL,
+            window_started_at TEXT NOT NULL,
+            window_ends_at TEXT NOT NULL,
+            admitted_turns INTEGER NOT NULL DEFAULT 0,
+            notice_sent INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(chat_id, telegram_user_id)
+        )"""
+    )
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_user_quotas_window ON ai_user_quotas(window_ends_at)")
+
+
+async def _migrate_ai_quota_deferred_flag(db) -> None:
+    await _ensure_columns(db, "user_turns", {"quota_deferred": "INTEGER NOT NULL DEFAULT 0"})
+
+
 async def _applied_versions(db) -> set[int]:
     rows = await db.execute_fetchall("SELECT version FROM schema_migrations")
     return {row["version"] for row in rows}
@@ -551,6 +582,20 @@ async def _apply_migrations(db) -> None:
         await _migrate_ai_knowledge(db)
         await db.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (7, ?)",
+            (datetime_to_iso(utc_now()),),
+        )
+
+    if 8 not in applied_versions:
+        await _migrate_ai_turn_quota_and_cursor(db)
+        await db.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (8, ?)",
+            (datetime_to_iso(utc_now()),),
+        )
+
+    if 9 not in applied_versions:
+        await _migrate_ai_quota_deferred_flag(db)
+        await db.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (9, ?)",
             (datetime_to_iso(utc_now()),),
         )
 

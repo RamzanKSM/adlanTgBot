@@ -119,6 +119,7 @@ class RetrievedChunk:
     source_sender_telegram_user_id: int | None
     text: str
     distance: float
+    quote_candidate: str = ""
 
 
 class KnowledgeIndex:
@@ -233,9 +234,11 @@ class KnowledgeIndex:
                 continue
             row = min(group, key=lambda item: distances[int(item["chunk_id"])])
             used_chars += len(text)
+            best_raw_start, best_raw_end = int(row["raw_start_char"]), int(row["raw_end_char"])
             result.append(RetrievedChunk(chunk_id=int(row["chunk_id"]), source_message_id=source_id,
                 source_telegram_message_id=row["telegram_message_id"], source_chat_id=row["chat_id"],
-                source_sender_telegram_user_id=row["sender_telegram_user_id"], text=text, distance=distances[int(row["chunk_id"])]))
+                source_sender_telegram_user_id=row["sender_telegram_user_id"], text=text, distance=distances[int(row["chunk_id"])],
+                quote_candidate=raw[best_raw_start:best_raw_end]))
             if len(result) >= top_k:
                 break
         logger.info("ai.retrieve status=ok query_chars=%s returned=%s duration_ms=%s", len(query), len(result), int((time.monotonic() - started) * 1000))

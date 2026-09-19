@@ -23,6 +23,18 @@ def _message_text(message: Message) -> tuple[str, str] | None:
     return None
 
 
+def _human_author_id(message: Message) -> int | None:
+    """Only a real human can own a conversational turn.
+
+    Anonymous administrators may arrive as a sender_chat update with a
+    synthetic GroupAnonymousBot ``from_user``; regular bot posts also have a
+    numeric user id.  Both remain durable messages, not conversation owners.
+    """
+    if message.sender_chat is not None or message.from_user is None or getattr(message.from_user, "is_bot", False):
+        return None
+    return message.from_user.id
+
+
 def _is_knowledge_candidate(message: Message, settings: Settings) -> bool:
     """Apply the source policy before the neural educational classifier.
 
@@ -40,18 +52,24 @@ def _entity_text_utf16(text: str, offset: int, length: int) -> str:
     return raw[offset * 2:(offset + length) * 2].decode("utf-16-le")
 
 
-def _is_bot_invocation(message: Message, *, bot_id: int, bot_username: str | None, onboarding_pending: bool, active_session: bool) -> bool:
-    if onboarding_pending or active_session:
-        return True
+def _invocation_kind(message: Message, *, bot_id: int, bot_username: str | None, onboarding_pending: bool, active_session: bool) -> tuple[str, bool]:
+    """Direct address informs routing but never gates ambient observation."""
     if message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot_id:
-        return True
+        return "reply_to_bot", True
     content = message.text or message.caption or ""
     entities = message.entities if message.text is not None else message.caption_entities
-    return bool(bot_username) and any(
+    mentioned = bool(bot_username) and any(
         getattr(entity.type, "value", entity.type) == "mention"
         and _entity_text_utf16(content, entity.offset, entity.length).lstrip("@").casefold() == bot_username.casefold()
         for entity in (entities or [])
     )
+    if mentioned:
+        return "mention", True
+    if onboarding_pending:
+        return "onboarding", True
+    if active_session:
+        return "active_session", False
+    return "ambient", False
 
 
 async def _persist(message: Message, settings: Settings, bot: Bot, *, edited: bool) -> None:
@@ -62,6 +80,7 @@ async def _persist(message: Message, settings: Settings, bot: Bot, *, edited: bo
         return
     text, kind = content
     telegram_user_id = message.from_user.id if message.from_user else None
+    human_author_id = _human_author_id(message)
     async with open_database(settings.database_path) as db:
         repo = AiRepository(db)
         stored = await repo.store_message(
@@ -94,28 +113,29 @@ async def _persist(message: Message, settings: Settings, bot: Bot, *, edited: bo
             if _is_knowledge_candidate(message, settings):
                 await repo.make_knowledge_candidate(stored.id)
                 await repo.audit("classify", "pending", chat_id=message.chat.id, telegram_user_id=telegram_user_id, message_row_id=stored.id)
-        onboarding_pending = telegram_user_id is not None and (
-            await repo.get_state(message.chat.id, telegram_user_id, "onboarding.awaiting") is not None
-            and await repo.get_state(message.chat.id, telegram_user_id, "onboarding.completed") is None
+        onboarding_pending = human_author_id is not None and (
+            await repo.get_state(message.chat.id, human_author_id, "onboarding.awaiting") is not None
+            and await repo.get_state(message.chat.id, human_author_id, "onboarding.completed") is None
         )
-        active_session = await repo.active_session(message.chat.id, telegram_user_id) if telegram_user_id is not None else False
+        active_session = await repo.active_session(message.chat.id, human_author_id) if human_author_id is not None else False
         await db.commit()
-        if telegram_user_id is not None and stored.changed and not edited:
+        invocation_kind, invocation_explicit = "ambient", False
+        if human_author_id is not None and stored.changed and not edited:
             needs_username = any(getattr(entity.type, "value", entity.type) == "mention" for entity in ((message.entities if message.text is not None else message.caption_entities) or []))
             try:
                 me = await bot.get_me() if needs_username else None
-                invoked = _is_bot_invocation(message, bot_id=bot.id, bot_username=me.username if me else None, onboarding_pending=onboarding_pending, active_session=active_session)
+                invocation_kind, invocation_explicit = _invocation_kind(message, bot_id=bot.id, bot_username=me.username if me else None, onboarding_pending=onboarding_pending, active_session=active_session)
             except Exception:
-                # Never turn an arbitrary @mention into our invocation. The
-                # durable row remains stored and the next real interaction can
-                # route it after bot identity is available.
-                invoked = onboarding_pending or active_session
+                # Identity lookup never suppresses the ambient turn.
+                invocation_kind = "onboarding" if onboarding_pending else "active_session" if active_session else "ambient"
+                invocation_explicit = onboarding_pending
                 await repo.audit("turn", "identity_unavailable", chat_id=message.chat.id, telegram_user_id=telegram_user_id, message_row_id=stored.id)
-        else:
-            invoked = False
-        if invoked:
+        if human_author_id is not None and stored.changed and not edited:
             # Commit the message before the separate BEGIN IMMEDIATE debounce claim.
-            turn_id = await repo.schedule_turn(message.chat.id, telegram_user_id, stored.id, settings.ai_turn_debounce_seconds)
+            turn_id = await repo.schedule_turn(
+                message.chat.id, human_author_id, stored.id, settings.ai_turn_debounce_seconds,
+                invocation_kind=invocation_kind, invocation_explicit=invocation_explicit,
+            )
             await repo.audit("turn", "scheduled", chat_id=message.chat.id, telegram_user_id=telegram_user_id, message_row_id=stored.id, turn_id=turn_id)
             await db.commit()
     logger.info("ai.message_saved chat_id=%s message_id=%s kind=%s edited=%s", message.chat.id, message.message_id, kind, edited)

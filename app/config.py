@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # Telegram messages and retrieved channel knowledge.
     ai_debug_logging: bool = False
     ai_turn_debounce_seconds: int = 30
+    ai_user_max_turns_per_window: int = 100
+    ai_user_limit_window_seconds: int = 18_000
+    ai_deferred_batch_max_chars: int = 2_000
     ai_recent_context_limit: int = 40
     ai_retrieval_top_k: int = 10
     ai_retrieval_context_chars: int = 12_000
@@ -79,6 +82,13 @@ class Settings(BaseSettings):
         if normalized not in allowed:
             raise ValueError("AI_WORKER_REASONING_EFFORT must be one of: none, minimal, low, medium, high, xhigh, max")
         return normalized
+
+    @field_validator("ai_turn_debounce_seconds", "ai_user_max_turns_per_window", "ai_user_limit_window_seconds", "ai_deferred_batch_max_chars")
+    @classmethod
+    def validate_positive_ai_limit(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("AI turn and quota settings must be positive")
+        return value
 
     @property
     def is_mock_payments_enabled(self) -> bool:
