@@ -41,8 +41,11 @@ class Answer:
 
 class CodexCliWorker:
     """Official non-interactive Codex exec adapter with file-only JSON result."""
-    def __init__(self, executable: str, timeout_seconds: int):
-        self.executable, self.timeout_seconds = executable, timeout_seconds
+    def __init__(self, executable: str, timeout_seconds: int, model: str, reasoning_effort: str):
+        self.executable = executable
+        self.timeout_seconds = timeout_seconds
+        self.model = model
+        self.reasoning_effort = reasoning_effort
 
     @staticmethod
     def _safe_env() -> dict[str, str]:
@@ -55,7 +58,15 @@ class CodexCliWorker:
             root = Path(cwd)
             schema_path, result_path = root / "schema.json", root / "result.json"
             schema_path.write_text(json.dumps(schema, separators=(",", ":")), encoding="utf-8")
-            argv = [self.executable, "exec", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only", "--skip-git-repo-check", "--output-schema", str(schema_path), "-o", str(result_path), prompt]
+            # Model selection is intentionally passed on every invocation from
+            # Settings/environment, not inherited from user CLI configuration.
+            argv = [
+                self.executable, "exec", "--model", self.model,
+                "--config", f'model_reasoning_effort="{self.reasoning_effort}"',
+                "--ephemeral", "--ignore-user-config", "--ignore-rules",
+                "--sandbox", "read-only", "--skip-git-repo-check",
+                "--output-schema", str(schema_path), "-o", str(result_path), prompt,
+            ]
             process = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, cwd=cwd, env=self._safe_env())
             try:
                 await asyncio.wait_for(process.communicate(json.dumps(payload, ensure_ascii=False).encode()), self.timeout_seconds)

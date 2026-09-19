@@ -291,10 +291,26 @@ async def test_worker_uses_official_argv_schema_and_result_file(monkeypatch) -> 
         return FakeProcess()
 
     monkeypatch.setattr(worker_module.asyncio, "create_subprocess_exec", fake_exec)
-    result = await CodexCliWorker("codex", 1).classify("content")
+    result = await CodexCliWorker("codex", 1, "gpt-5.6-luna", "medium").classify("content")
     assert result.decision == "include"
     for flag in ("--ephemeral", "--ignore-user-config", "--ignore-rules", "--output-schema", "-o"):
         assert flag in captured
+    assert captured[captured.index("--model") + 1] == "gpt-5.6-luna"
+    assert captured[captured.index("--config") + 1] == 'model_reasoning_effort="medium"'
+
+
+def test_ai_worker_model_and_reasoning_effort_come_from_validated_settings() -> None:
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    settings = Settings(ai_worker_model="gpt-5.6-luna", ai_worker_reasoning_effort="MEDIUM")
+    assert settings.ai_worker_model == "gpt-5.6-luna"
+    assert settings.ai_worker_reasoning_effort == "medium"
+    with pytest.raises(ValidationError, match="AI_WORKER_MODEL"):
+        Settings(ai_worker_model="   ")
+    with pytest.raises(ValidationError, match="AI_WORKER_REASONING_EFFORT"):
+        Settings(ai_worker_reasoning_effort="ultra")
 
 
 async def test_due_turn_aggregates_all_messages_and_no_response_skips_send(monkeypatch, tmp_path) -> None:

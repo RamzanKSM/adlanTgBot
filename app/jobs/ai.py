@@ -20,7 +20,12 @@ logger = logging.getLogger(__name__)
 
 
 def _worker(settings: Settings) -> CodexCliWorker:
-    return CodexCliWorker(settings.ai_worker_executable, settings.ai_worker_timeout_seconds)
+    return CodexCliWorker(
+        settings.ai_worker_executable,
+        settings.ai_worker_timeout_seconds,
+        settings.ai_worker_model,
+        settings.ai_worker_reasoning_effort,
+    )
 
 
 async def process_knowledge_candidates(settings: Settings) -> None:

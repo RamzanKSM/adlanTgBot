@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     ai_scheduler_interval_seconds: int = 5
     ai_worker_executable: str = "codex"
     ai_worker_timeout_seconds: int = 90
+    ai_worker_model: str = "gpt-5.6-luna"
+    ai_worker_reasoning_effort: str = "medium"
     ai_session_timeout_seconds: int = 600
     ai_retry_max_attempts: int = 5
     ai_retry_base_seconds: int = 30
@@ -56,6 +58,23 @@ class Settings(BaseSettings):
         normalized = value.strip().lower()
         if normalized not in {"lava", "mock"}:
             raise ValueError("PAYMENT_PROVIDER must be 'lava' or 'mock'")
+        return normalized
+
+    @field_validator("ai_worker_model")
+    @classmethod
+    def validate_ai_worker_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("AI_WORKER_MODEL must not be empty")
+        return normalized
+
+    @field_validator("ai_worker_reasoning_effort")
+    @classmethod
+    def validate_ai_worker_reasoning_effort(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        allowed = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+        if normalized not in allowed:
+            raise ValueError("AI_WORKER_REASONING_EFFORT must be one of: none, minimal, low, medium, high, xhigh, max")
         return normalized
 
     @property
