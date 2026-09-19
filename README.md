@@ -249,21 +249,19 @@ docker compose logs -f ai-worker
 
 ### Полная очистка тестовой базы знаний
 
-Если обучающие сообщения уже удалены из Telegram и требуется удалить только их сохранённые копии, используйте утилиту из image `ai-worker`. Сначала остановите worker, чтобы во время очистки он не успел обработать уже выбранный кандидат, и выполните dry-run:
+Если обучающие сообщения уже удалены из Telegram и требуется удалить только их сохранённые копии, выполните dry-run на сервере из корня репозитория:
 
 ```bash
-docker compose stop ai-worker
-docker compose run --rm --no-deps ai-worker python -m app.tools.delete_knowledge_messages
+python3 scripts/knowledge_clear.py
 ```
 
-Dry-run выводит число `knowledge_messages`, `knowledge_chunks`, векторов и исходных `telegram_messages`, которые будут удалены, но ничего не меняет. Для фактической очистки добавьте единственный явный флаг `--apply`:
+Dry-run выводит число `knowledge_messages`, `knowledge_chunks` и исходных `telegram_messages`, которые будут удалены, но ничего не меняет. Для фактической очистки добавьте единственный явный флаг `--apply`:
 
 ```bash
-docker compose run --rm --no-deps ai-worker python -m app.tools.delete_knowledge_messages --apply
-docker compose up -d ai-worker
+python3 scripts/knowledge_clear.py --apply
 ```
 
-Команда берёт путь из `DATABASE_PATH` (либо принимает `--database-path /path/to/bot.sqlite3`), ждёт SQLite writer до 10 секунд и выполняет работу одной транзакцией. Она удаляет все векторы, затем только Telegram-строки, связанные с knowledge-состоянием; обычная история сообщений, `user_turns`, `conversational_states` и события аудита не удаляются. При наличии векторной таблицы отсутствие доступного `sqlite-vec` прерывает команду до изменений.
+Скрипт работает с SQLite напрямую, без Docker. По умолчанию он использует `/root/adlanbot/data/bot.sqlite3`; другой путь можно передать через `--database-path /path/to/bot.sqlite3`. При `--apply` он ждёт SQLite writer до 10 секунд и выполняет работу одной транзакцией. Он удаляет только Telegram-строки, связанные с knowledge-состоянием, затем `knowledge_chunks` и `knowledge_messages`; обычная история сообщений, `user_turns`, `conversational_states` и события аудита не удаляются. Скрипт намеренно не открывает и не меняет virtual-таблицу `knowledge_chunk_vectors`, так как для неё нужен `sqlite-vec`: после удаления `knowledge_chunks` её оставшиеся строки не участвуют в поиске, а `KnowledgeIndex.initialize()` удалит их при следующем перезапуске `ai-worker`. После `--apply` перезапустите `ai-worker`, чтобы завершить эту физическую уборку векторов.
 
 ## Меню и команды бота
 
