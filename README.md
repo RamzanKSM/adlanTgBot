@@ -247,6 +247,24 @@ docker compose logs -f ai-worker
 
 После сознательного изменения embedding/chunk profile rebuild выполняется отдельной командой worker image: `docker compose run --rm ai-worker python -m app.ai.rebuild`. При несовпадающем профиле обычный worker отказывается индексировать до rebuild.
 
+### Полная очистка тестовой базы знаний
+
+Если обучающие сообщения уже удалены из Telegram и требуется удалить только их сохранённые копии, используйте утилиту из image `ai-worker`. Сначала остановите worker, чтобы во время очистки он не успел обработать уже выбранный кандидат, и выполните dry-run:
+
+```bash
+docker compose stop ai-worker
+docker compose run --rm --no-deps ai-worker python -m app.tools.delete_knowledge_messages
+```
+
+Dry-run выводит число `knowledge_messages`, `knowledge_chunks`, векторов и исходных `telegram_messages`, которые будут удалены, но ничего не меняет. Для фактической очистки добавьте единственный явный флаг `--apply`:
+
+```bash
+docker compose run --rm --no-deps ai-worker python -m app.tools.delete_knowledge_messages --apply
+docker compose up -d ai-worker
+```
+
+Команда берёт путь из `DATABASE_PATH` (либо принимает `--database-path /path/to/bot.sqlite3`), ждёт SQLite writer до 10 секунд и выполняет работу одной транзакцией. Она удаляет все векторы, затем только Telegram-строки, связанные с knowledge-состоянием; обычная история сообщений, `user_turns`, `conversational_states` и события аудита не удаляются. При наличии векторной таблицы отсутствие доступного `sqlite-vec` прерывает команду до изменений.
+
 ## Меню и команды бота
 
 Основной пользовательский UX построен на Reply-клавиатуре в личном чате. При `/start` бот регистрирует пользователя и показывает кнопки:
