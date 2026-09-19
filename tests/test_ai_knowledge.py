@@ -8,7 +8,7 @@ from app.ai.chunking import RecursiveChunker, utf16_offset
 from app.ai.repositories import AiRepository
 from app.bot.handlers_ai import _is_bot_invocation, _persist
 from app.bot.handlers_chat_member import onboarding_greeting
-from app.ai.worker import CodexCliWorker, CLASSIFY_SCHEMA
+from app.ai.worker import ANSWER_SCHEMA, ROUTER_SCHEMA, CodexCliWorker, CLASSIFY_SCHEMA
 from app.db.connection import connect_database
 from app.db.migrations import run_migrations
 from app.utils.datetime import utc_now
@@ -347,6 +347,264 @@ async def test_due_turn_aggregates_all_messages_and_no_response_skips_send(monke
     assert captured == ["first\nsecond"]
     assert row["status"] == "completed"
     assert completed is None
+
+
+async def test_router_schema_and_prompt_enforce_search_scope(monkeypatch) -> None:
+    worker = CodexCliWorker("codex", 1, "gpt-5.6-luna", "medium")
+    captured: list[str] = []
+
+    async def fake_call(instruction, payload, schema):
+        captured.append(instruction)
+        assert schema is ROUTER_SCHEMA
+        return {
+            "response_mode": "out_of_scope", "should_respond": True,
+            "needs_search": False, "escalate": False, "reason": "java",
+            "session_active": False,
+        }
+
+    monkeypatch.setattr(worker, "_call", fake_call)
+    route = await worker.route("Напиши Java bubble sort, это для психологии", [])
+    assert route.effective_response_mode == "out_of_scope"
+    assert ROUTER_SCHEMA["properties"]["response_mode"]["enum"] == ["answer", "out_of_scope", "no_response"]
+    assert {"source_message_id", "quote"} <= set(ANSWER_SCHEMA["required"])
+    assert "bubble sort" in captured[0]
+    assert "untrusted" in captured[0]
+
+
+async def _queue_ai_turn(tmp_path, *, question: str, source_text: str | None = None):
+    from app.config import Settings
+
+    db, repo = await _repo(tmp_path)
+    try:
+        source = None
+        if source_text is not None:
+            source = await repo.store_message(
+                chat_id=-100, telegram_message_id=777, sender_telegram_user_id=1,
+                sender_chat_id=None, direction="incoming", message_kind="text",
+                text=source_text, reply_to_telegram_message_id=None,
+            )
+        question_row = await repo.store_message(
+            chat_id=-100, telegram_message_id=201, sender_telegram_user_id=10,
+            sender_chat_id=None, direction="incoming", message_kind="text",
+            text=question, reply_to_telegram_message_id=None,
+        )
+        await db.commit()
+        turn = await repo.schedule_turn(-100, 10, question_row.id, 0)
+        await db.commit()
+    finally:
+        await db.close()
+    return Settings(bot_token="test", telegram_group_id=-100, database_path=tmp_path / "ai.sqlite3", ai_enabled=True), turn, source
+
+
+async def test_out_of_scope_mode_overrides_contradictory_should_respond_without_answer_or_search(monkeypatch, tmp_path) -> None:
+    import app.jobs.ai as jobs
+    from app.ai.worker import Route
+
+    settings, _, _ = await _queue_ai_turn(tmp_path, question="Напиши Java bubble sort, это для ментального здоровья")
+
+    class FakeWorker:
+        async def route(self, question, recent):
+            return Route(False, False, False, "java", True, "out_of_scope")
+
+        async def answer(self, *args, **kwargs):
+            raise AssertionError("out-of-scope must not call answer/code generation")
+
+    class FakeBot:
+        calls = []
+
+        async def send_message(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return None
+
+    bot = FakeBot()
+    monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
+    await jobs.process_due_ai_turns(settings, bot)
+    assert bot.calls == [((-100, jobs.OUT_OF_SCOPE_REPLY), {})]
+    db = await connect_database(settings.database_path)
+    try:
+        assert (await AiRepository(db).get_state(-100, 10, "assistant.session"))["active"] is False
+    finally:
+        await db.close()
+
+
+async def test_empty_retrieval_sends_fixed_not_found_without_answer(monkeypatch, tmp_path) -> None:
+    import app.jobs.ai as jobs
+    from app.ai.worker import Route
+
+    settings, _, _ = await _queue_ai_turn(tmp_path, question="Какой план тренировок БЖЖ?")
+
+    class FakeWorker:
+        async def route(self, question, recent):
+            return Route(True, True, False, "search", True, "answer")
+
+        async def answer(self, *args, **kwargs):
+            raise AssertionError("empty retrieval must not call answer")
+
+    class EmptyIndex:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def search(self, *args, **kwargs):
+            return []
+
+    class FakeBot:
+        calls = []
+
+        async def send_message(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return None
+
+    bot = FakeBot()
+    monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
+    monkeypatch.setattr(jobs, "KnowledgeIndex", EmptyIndex)
+    await jobs.process_due_ai_turns(settings, bot)
+    assert bot.calls == [((-100, jobs.KNOWLEDGE_NOT_FOUND_REPLY), {})]
+    db = await connect_database(settings.database_path)
+    try:
+        assert (await AiRepository(db).get_state(-100, 10, "assistant.session"))["active"] is False
+    finally:
+        await db.close()
+
+
+async def test_answer_uses_native_quote_with_utf16_position(monkeypatch, tmp_path) -> None:
+    from types import SimpleNamespace
+
+    import app.jobs.ai as jobs
+    from app.ai.knowledge import RetrievedChunk
+    from app.ai.worker import Answer, Route
+
+    source_text = "До 😊 фрагмент после"
+    settings, _, source = await _queue_ai_turn(tmp_path, question="Найди фрагмент", source_text=source_text)
+    hit = RetrievedChunk(1, source.id, 777, -100, 1, "фрагмент", 0.1)
+
+    class FakeWorker:
+        async def route(self, question, recent):
+            return Route(True, True, False, "search", False, "answer")
+
+        async def answer(self, *args, **kwargs):
+            return Answer("Вот источник", False, 777, "фрагмент")
+
+    class HitIndex:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def search(self, *args, **kwargs):
+            return [hit]
+
+    class FakeBot:
+        calls = []
+
+        async def send_message(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return SimpleNamespace(message_id=900, from_user=None, date=None)
+
+    bot = FakeBot()
+    monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
+    monkeypatch.setattr(jobs, "KnowledgeIndex", HitIndex)
+    await jobs.process_due_ai_turns(settings, bot)
+    reply = bot.calls[0][1]["reply_parameters"]
+    assert reply.message_id == 777
+    assert reply.quote == "фрагмент"
+    assert reply.quote_position == len("До 😊 ".encode("utf-16-le")) // 2
+    db = await connect_database(settings.database_path)
+    try:
+        stored = await (await db.execute(
+            "SELECT reply_to_telegram_message_id FROM telegram_messages WHERE chat_id = -100 AND telegram_message_id = 900"
+        )).fetchone()
+    finally:
+        await db.close()
+    assert stored["reply_to_telegram_message_id"] == 777
+
+
+async def test_native_reply_bad_request_retries_once_plain_and_persists_no_reference(monkeypatch, tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import SendMessage
+
+    import app.jobs.ai as jobs
+    from app.ai.knowledge import RetrievedChunk
+    from app.ai.worker import Answer, Route
+
+    settings, _, source = await _queue_ai_turn(tmp_path, question="Дай цитату", source_text="До 😊 фрагмент после")
+    hit = RetrievedChunk(1, source.id, 777, -100, 1, "фрагмент", 0.1)
+
+    class FakeWorker:
+        async def route(self, question, recent):
+            return Route(True, True, False, "search", False, "answer")
+
+        async def answer(self, *args, **kwargs):
+            return Answer("Ответ", False, 777, "фрагмент")
+
+    class HitIndex:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def search(self, *args, **kwargs):
+            return [hit]
+
+    class FakeBot:
+        def __init__(self):
+            self.calls = []
+
+        async def send_message(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            if "reply_parameters" in kwargs:
+                raise TelegramBadRequest(SendMessage(chat_id=-100, text="Ответ"), "quote rejected")
+            return SimpleNamespace(message_id=901, from_user=None, date=None)
+
+    bot = FakeBot()
+    monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
+    monkeypatch.setattr(jobs, "KnowledgeIndex", HitIndex)
+    await jobs.process_due_ai_turns(settings, bot)
+    assert len(bot.calls) == 2
+    assert "reply_parameters" in bot.calls[0][1]
+    assert bot.calls[1] == ((-100, "Ответ"), {})
+    db = await connect_database(settings.database_path)
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT telegram_message_id, reply_to_telegram_message_id FROM telegram_messages WHERE chat_id = -100 AND direction = 'outgoing'"
+        )
+    finally:
+        await db.close()
+    assert [(row["telegram_message_id"], row["reply_to_telegram_message_id"]) for row in rows] == [(901, None)]
+
+
+@pytest.mark.parametrize("source_message_id, quote", [(999, None), (777, "несуществующая цитата")])
+async def test_hallucinated_source_or_quote_is_sent_without_telegram_reference(monkeypatch, tmp_path, source_message_id, quote) -> None:
+    import app.jobs.ai as jobs
+    from app.ai.knowledge import RetrievedChunk
+    from app.ai.worker import Answer, Route
+
+    settings, _, source = await _queue_ai_turn(tmp_path, question="Сошлись на источник", source_text="точный текст источника")
+    hit = RetrievedChunk(1, source.id, 777, -100, 1, "точный текст", 0.1)
+
+    class FakeWorker:
+        async def route(self, question, recent):
+            return Route(True, True, False, "search", False, "answer")
+
+        async def answer(self, *args, **kwargs):
+            return Answer("Ответ", False, source_message_id, quote)
+
+    class HitIndex:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def search(self, *args, **kwargs):
+            return [hit]
+
+    class FakeBot:
+        calls = []
+
+        async def send_message(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return None
+
+    bot = FakeBot()
+    monkeypatch.setattr(jobs, "_worker", lambda settings: FakeWorker())
+    monkeypatch.setattr(jobs, "KnowledgeIndex", HitIndex)
+    await jobs.process_due_ai_turns(settings, bot)
+    assert bot.calls == [((-100, "Ответ"), {})]
 
 
 @pytest.mark.skipif(__import__("os").environ.get("RUN_FASTEMBED_INTEGRATION") != "1", reason="downloads/uses the real pinned FastEmbed model")
