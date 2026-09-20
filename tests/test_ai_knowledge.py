@@ -398,6 +398,22 @@ def test_ai_worker_model_and_reasoning_effort_come_from_validated_settings() -> 
         Settings(ai_worker_reasoning_effort="ultra")
 
 
+def test_bounded_context_settings_have_safe_defaults_and_reject_zero() -> None:
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    settings = Settings()
+    assert (
+        settings.ai_router_context_max_chars,
+        settings.ai_router_context_message_max_chars,
+        settings.ai_answer_context_limit,
+        settings.ai_answer_context_max_chars,
+    ) == (8_000, 2_000, 6, 3_000)
+    with pytest.raises(ValidationError, match="AI turn and quota settings"):
+        Settings(ai_answer_context_limit=0)
+
+
 async def test_due_turn_aggregates_all_messages_and_no_response_skips_send(monkeypatch, tmp_path) -> None:
     import app.jobs.ai as jobs
     from app.ai.worker import Route
@@ -470,6 +486,111 @@ async def test_router_normalizes_invalid_knowledge_none_to_source_reply(monkeypa
     monkeypatch.setattr(worker, "_call", fake_call)
     route = await worker.route([{"text": "тегни сообщение с планом"}], {"recent_group_context": []})
     assert route.reference_mode == "reply"
+
+
+def test_bounded_router_context_uses_newest_rows_before_chronological_output() -> None:
+    from app.config import Settings
+    from app.jobs.ai import _recent_context_fetch_limit, _router_context
+
+    def row(message_id: int, text: str, *, direction: str = "incoming", sender: int | None = 10):
+        return {
+            "sender_telegram_user_id": sender,
+            "author_display_name": f"Author {message_id}",
+            "telegram_message_id": message_id,
+            "created_at": f"2026-01-01T00:00:0{message_id}+00:00",
+            "direction": direction,
+            "text": text,
+        }
+
+    settings = Settings(
+        ai_recent_context_limit=40,
+        ai_router_context_message_max_chars=5,
+        ai_router_context_max_chars=8,
+    )
+    newest_first = [
+        row(60, "current batch must be excluded"),
+        row(59, "newest message"),
+        row(58, "outgoing clarification", direction="outgoing", sender=None),
+        row(57, "old educational post " * 100),
+    ]
+
+    context = _router_context(newest_first, [{"telegram_message_id": 60}], settings)
+
+    # The newest eligible rows consume the budget first, yet the model sees a
+    # natural chronological transcript. The old post cannot displace them.
+    assert [item["telegram_message_id"] for item in context] == [58, 59]
+    assert [item["text"] for item in context] == ["out", "newes"]
+    assert sum(len(item["text"]) for item in context) == 8
+    assert set(context[0]) == {
+        "sender_telegram_user_id", "author_display_name", "telegram_message_id",
+        "created_at", "direction", "text",
+    }
+    assert _recent_context_fetch_limit(
+        [{"telegram_message_id": 60}, {"telegram_message_id": 60}, {"telegram_message_id": 61}],
+        settings,
+    ) == 42
+
+
+def test_answer_conversation_slice_keeps_same_user_and_outgoing_clarification() -> None:
+    from app.config import Settings
+    from app.jobs.ai import _answer_conversation_slice
+
+    def row(message_id: int, text: str, *, direction: str, sender: int | None):
+        return {
+            "sender_telegram_user_id": sender,
+            "author_display_name": f"Author {message_id}",
+            "telegram_message_id": message_id,
+            "created_at": f"2026-01-01T00:00:0{message_id}+00:00",
+            "direction": direction,
+            "text": text,
+        }
+
+    settings = Settings(ai_answer_context_limit=6, ai_answer_context_max_chars=3000)
+    newest_first = [
+        row(70, "да", direction="incoming", sender=10),
+        row(69, "другой участник", direction="incoming", sender=11),
+        row(68, "Ты имеешь в виду сообщение с планом питания?", direction="outgoing", sender=None),
+        row(67, "можешь тегнуть сообщение?", direction="incoming", sender=10),
+        row(66, "старый чужой пост", direction="incoming", sender=12),
+    ]
+
+    slice_ = _answer_conversation_slice(
+        newest_first, [{"telegram_message_id": 70}], 10, settings,
+    )
+
+    assert [item["telegram_message_id"] for item in slice_] == [67, 68]
+    assert [item["text"] for item in slice_] == [
+        "можешь тегнуть сообщение?", "Ты имеешь в виду сообщение с планом питания?",
+    ]
+
+
+async def test_answer_payload_has_continuity_slice_but_not_full_group_context(monkeypatch) -> None:
+    worker = CodexCliWorker("codex", 1, "gpt-5.6-luna", "medium")
+    captured: dict = {}
+
+    async def fake_call(stage, instruction, payload, schema, **kwargs):
+        captured.update({"instruction": instruction, "payload": payload})
+        return {"text": "Ответ", "source_message_id": 229, "quote": None}
+
+    monkeypatch.setattr(worker, "_call", fake_call)
+    await worker.answer(
+        [{"telegram_message_id": 248, "text": "да"}],
+        [{"source_message_id": 229, "text": "Проверенное знание", "quote_candidate": "знание", "distance": 0.1}],
+        {
+            "conversation_slice": [{"telegram_message_id": 247, "text": "Уточнение бота"}],
+            "user": {"id": 10},
+            "invocation": {"kind": "mention", "explicit": True},
+            "onboarding_pending": False,
+            "deferred": False,
+            "deferred_since": None,
+            "reference_mode": "reply",
+        },
+    )
+
+    assert "recent_group_context" not in captured["payload"]
+    assert captured["payload"]["conversation_slice"] == [{"telegram_message_id": 247, "text": "Уточнение бота"}]
+    assert "only knowledge source" in captured["instruction"]
+    assert "from retrieved_context only" in captured["instruction"]
 
 
 async def _queue_ai_turn(tmp_path, *, question: str, source_text: str | None = None):

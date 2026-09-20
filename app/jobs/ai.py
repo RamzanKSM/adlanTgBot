@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import timedelta
+from typing import Any, Callable, Mapping, Sequence
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
@@ -59,6 +60,95 @@ def _turn_summary(settings: Settings, turn, batch: list[dict] | None, **fields: 
     }
     summary.update(fields)
     _debug_log(settings, "turn.summary", **summary)
+
+
+CONTEXT_MESSAGE_FIELDS = (
+    "sender_telegram_user_id",
+    "author_display_name",
+    "telegram_message_id",
+    "created_at",
+    "direction",
+    "text",
+)
+
+
+def _bounded_context_slice(
+    newest_first_rows: Sequence[Mapping[str, Any]],
+    *,
+    excluded_telegram_message_ids: set[int],
+    message_limit: int,
+    message_max_chars: int,
+    total_max_chars: int,
+    include: Callable[[Mapping[str, Any]], bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Select newest context first, then return it in chronological order.
+
+    The repository deliberately returns newest-first rows. Consuming that order
+    ensures an old long post cannot use the whole budget before a user's most
+    recent clarification is considered.
+    """
+    selected: list[dict[str, Any]] = []
+    remaining = total_max_chars
+    for row in newest_first_rows:
+        if len(selected) >= message_limit or remaining <= 0:
+            break
+        telegram_message_id = int(row["telegram_message_id"])
+        if telegram_message_id in excluded_telegram_message_ids:
+            continue
+        if include is not None and not include(row):
+            continue
+        capped_text = str(row["text"] or "")[:message_max_chars]
+        if len(capped_text) > remaining:
+            capped_text = capped_text[:remaining]
+        item = {field: row[field] for field in CONTEXT_MESSAGE_FIELDS}
+        item["text"] = capped_text
+        selected.append(item)
+        remaining -= len(capped_text)
+    selected.reverse()
+    return selected
+
+
+def _context_text_chars(messages: Sequence[Mapping[str, Any]]) -> int:
+    return sum(len(str(message.get("text") or "")) for message in messages)
+
+
+def _current_batch_message_ids(batch: Sequence[Mapping[str, Any]]) -> set[int]:
+    return {int(item["telegram_message_id"]) for item in batch}
+
+
+def _recent_context_fetch_limit(current_batch: Sequence[Mapping[str, Any]], settings: Settings) -> int:
+    """Reserve query rows for current-batch messages removed after fetching."""
+    return settings.ai_recent_context_limit + len(_current_batch_message_ids(current_batch))
+
+
+def _router_context(
+    newest_first_rows: Sequence[Mapping[str, Any]],
+    current_batch: Sequence[Mapping[str, Any]],
+    settings: Settings,
+) -> list[dict[str, Any]]:
+    return _bounded_context_slice(
+        newest_first_rows,
+        excluded_telegram_message_ids=_current_batch_message_ids(current_batch),
+        message_limit=settings.ai_recent_context_limit,
+        message_max_chars=settings.ai_router_context_message_max_chars,
+        total_max_chars=settings.ai_router_context_max_chars,
+    )
+
+
+def _answer_conversation_slice(
+    newest_first_rows: Sequence[Mapping[str, Any]],
+    current_batch: Sequence[Mapping[str, Any]],
+    telegram_user_id: int,
+    settings: Settings,
+) -> list[dict[str, Any]]:
+    return _bounded_context_slice(
+        newest_first_rows,
+        excluded_telegram_message_ids=_current_batch_message_ids(current_batch),
+        message_limit=settings.ai_answer_context_limit,
+        message_max_chars=settings.ai_answer_context_max_chars,
+        total_max_chars=settings.ai_answer_context_max_chars,
+        include=lambda row: row["direction"] == "outgoing" or row["sender_telegram_user_id"] == telegram_user_id,
+    )
 
 
 async def _effective_source(db, *, chat_id: int, retrieved, model_source_id: int) -> tuple[object | None, str]:
@@ -321,10 +411,36 @@ async def process_due_ai_turns(settings: Settings, bot: Bot) -> None:
                     batch_debug.append({**item, "original_text": original["text"] if original else None})
                 user = batch[-1]
                 onboarding_pending = await repo.get_state(turn["chat_id"], turn["telegram_user_id"], "onboarding.awaiting") is not None and await repo.get_state(turn["chat_id"], turn["telegram_user_id"], "onboarding.completed") is None
-                recent = [{"sender_telegram_user_id": row["sender_telegram_user_id"], "author_display_name": row["author_display_name"], "telegram_message_id": row["telegram_message_id"], "created_at": row["created_at"], "direction": row["direction"], "text": row["text"]} for row in reversed(await repo.recent_messages(turn["chat_id"], settings.ai_recent_context_limit))]
+                recent_rows = await repo.recent_messages(
+                    turn["chat_id"],
+                    _recent_context_fetch_limit(batch, settings),
+                )
+                router_context = _router_context(recent_rows, batch, settings)
+                conversation_slice = _answer_conversation_slice(
+                    recent_rows, batch, turn["telegram_user_id"], settings,
+                )
                 await db.commit()
                 trace = {"turn_id": turn["id"]}
-                context = {"recent_group_context": recent, "user": {"id": turn["telegram_user_id"], "username": user["author_username"], "display_name": user["author_display_name"], "author_is_admin": turn["telegram_user_id"] in settings.admin_ids}, "invocation": {"kind": turn["invocation_kind"], "explicit": bool(turn["invocation_explicit"])}, "onboarding_pending": onboarding_pending, "deferred": bool(turn["cursor_message_link_id"]) or bool(turn["quota_deferred"]), "deferred_since": turn["created_at"] if (turn["cursor_message_link_id"] or turn["quota_deferred"]) else None}
+                context = {"recent_group_context": router_context, "user": {"id": turn["telegram_user_id"], "username": user["author_username"], "display_name": user["author_display_name"], "author_is_admin": turn["telegram_user_id"] in settings.admin_ids}, "invocation": {"kind": turn["invocation_kind"], "explicit": bool(turn["invocation_explicit"])}, "onboarding_pending": onboarding_pending, "deferred": bool(turn["cursor_message_link_id"]) or bool(turn["quota_deferred"]), "deferred_since": turn["created_at"] if (turn["cursor_message_link_id"] or turn["quota_deferred"]) else None}
+                answer_metadata = {
+                    "conversation_slice": conversation_slice,
+                    "user": context["user"],
+                    "invocation": context["invocation"],
+                    "onboarding_pending": context["onboarding_pending"],
+                    "deferred": context["deferred"],
+                    "deferred_since": context["deferred_since"],
+                }
+                _debug_log(
+                    settings,
+                    "context.prepared",
+                    chat_id=turn["chat_id"],
+                    telegram_user_id=turn["telegram_user_id"],
+                    turn_id=turn["id"],
+                    router_context_count=len(router_context),
+                    router_context_text_chars=_context_text_chars(router_context),
+                    answer_conversation_slice_count=len(conversation_slice),
+                    answer_conversation_slice_text_chars=_context_text_chars(conversation_slice),
+                )
                 route = await _worker(settings).route(batch, context, trace=trace)
                 _debug_log(
                     settings,
@@ -402,7 +518,7 @@ async def process_due_ai_turns(settings: Settings, bot: Bot) -> None:
                     _turn_summary(settings, turn, batch, status="not_found", response_mode=route.response_mode, user_telegram_message_id=user["telegram_message_id"], search_query=query or None, selected_reference_mode="none", reply_to_telegram_message_id=reply_to, mention_strategy=mention_strategy, telegram_error=telegram_error, fallback=fallback, delivery=delivery_result, session_active=False, requeued=requeued)
                     await db.commit()
                     continue
-                answer = await _worker(settings).answer(batch, [{"text": item.text, "quote_candidate": item.quote_candidate, "source_message_id": item.source_telegram_message_id, "distance": item.distance} for item in retrieved], {**context, "reference_mode": route.reference_mode}, trace=trace)
+                answer = await _worker(settings).answer(batch, [{"text": item.text, "quote_candidate": item.quote_candidate, "source_message_id": item.source_telegram_message_id, "distance": item.distance} for item in retrieved], {**answer_metadata, "reference_mode": route.reference_mode}, trace=trace)
                 await repo.audit("agent", "ok", chat_id=turn["chat_id"], telegram_user_id=turn["telegram_user_id"], turn_id=turn["id"])
                 await db.commit()
                 effective, source_validation = await _effective_source(db, chat_id=turn["chat_id"], retrieved=retrieved, model_source_id=answer.source_message_id)

@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     ai_user_limit_window_seconds: int = 18_000
     ai_deferred_batch_max_chars: int = 2_000
     ai_recent_context_limit: int = 40
+    ai_router_context_max_chars: int = 8_000
+    ai_router_context_message_max_chars: int = 2_000
+    ai_answer_context_limit: int = 6
+    ai_answer_context_max_chars: int = 3_000
     ai_retrieval_top_k: int = 10
     ai_retrieval_context_chars: int = 12_000
     ai_scheduler_interval_seconds: int = 5
@@ -83,7 +87,17 @@ class Settings(BaseSettings):
             raise ValueError("AI_WORKER_REASONING_EFFORT must be one of: none, minimal, low, medium, high, xhigh, max")
         return normalized
 
-    @field_validator("ai_turn_debounce_seconds", "ai_user_max_turns_per_window", "ai_user_limit_window_seconds", "ai_deferred_batch_max_chars")
+    @field_validator(
+        "ai_turn_debounce_seconds",
+        "ai_user_max_turns_per_window",
+        "ai_user_limit_window_seconds",
+        "ai_deferred_batch_max_chars",
+        "ai_recent_context_limit",
+        "ai_router_context_max_chars",
+        "ai_router_context_message_max_chars",
+        "ai_answer_context_limit",
+        "ai_answer_context_max_chars",
+    )
     @classmethod
     def validate_positive_ai_limit(cls, value: int) -> int:
         if value <= 0:
